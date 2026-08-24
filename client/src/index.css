@@ -1,0 +1,36 @@
+:root {
+  --color-bg: #f3f4f7;
+  --color-surface: #ffffff;
+  --color-border: #e2e4ea;
+  --color-text: #14181f;
+  --color-text-muted: #6b7280;
+  --color-accent: #3452e1;
+  --color-accent-hover: #2a41c2;
+  --color-error: #dc2626;
+  --color-success: #16a34a;
+  --font-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', 'SFMono-Regular', Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  color: var(--color-text);
+  background-color: var(--color-bg);
+  background-image: radial-gradient(var(--color-border) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+button {
+  font-family: inherit;
+}

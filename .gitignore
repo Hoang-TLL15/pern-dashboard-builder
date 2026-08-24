@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+*.log
+.codegraph/
+.playwright-mcp/
+docs/
+CLAUDE.md

@@ -1,0 +1,85 @@
+// Prisma schema cho Meta DB (dashboard_builder_meta) — DB hệ thống mà
+// server biết trước schema. KHÔNG áp dụng cho Data Source DB (vd
+// dashboard_builder_shop) — DB đó server không biết schema, chỉ chạy hộ
+// SQL đã duyệt sẵn trong query_configs (xem CLAUDE.md).
+//
+// Model khớp 1:1 với db/init_meta.sql — mọi thay đổi cấu trúc bảng phải
+// sửa cả 2 nơi cho tới khi Prisma Migrate thay thế init_meta.sql hoàn toàn.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           Int      @id @default(autoincrement())
+  username     String   @unique @db.VarChar(100)
+  passwordHash String   @map("password_hash") @db.VarChar(255)
+  createdAt    DateTime @default(now()) @map("created_at")
+  reports      Report[]
+
+  @@map("users")
+}
+
+model DbConnection {
+  id           Int           @id @default(autoincrement())
+  name         String        @db.VarChar(100)
+  dbType       String        @default("postgres") @map("db_type") @db.VarChar(50)
+  host         String        @db.VarChar(255)
+  port         Int
+  databaseName String        @map("database_name") @db.VarChar(100)
+  dbUser       String        @map("db_user") @db.VarChar(100)
+  dbPassword   String        @map("db_password") @db.VarChar(255)
+  createdAt    DateTime      @default(now()) @map("created_at")
+  queryConfigs QueryConfig[]
+
+  @@map("db_connections")
+}
+
+model QueryConfig {
+  id                 Int            @id @default(autoincrement())
+  name               String         @db.VarChar(255)
+  description        String?
+  dbConnectionId     Int            @map("db_connection_id")
+  dbConnection       DbConnection   @relation(fields: [dbConnectionId], references: [id])
+  query              String
+  suggestedChartType String         @map("suggested_chart_type") @db.VarChar(30)
+  createdAt          DateTime       @default(now()) @map("created_at")
+  reportWidgets      ReportWidget[]
+
+  @@index([dbConnectionId])
+  @@map("query_configs")
+}
+
+model Report {
+  id          Int            @id @default(autoincrement())
+  userId      Int            @map("user_id")
+  user        User           @relation(fields: [userId], references: [id])
+  name        String         @db.VarChar(255)
+  description String?
+  createdAt   DateTime       @default(now()) @map("created_at")
+  updatedAt   DateTime       @default(now()) @map("updated_at")
+  widgets     ReportWidget[]
+
+  @@index([userId])
+  @@map("reports")
+}
+
+model ReportWidget {
+  id            Int         @id @default(autoincrement())
+  reportId      Int         @map("report_id")
+  report        Report      @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  queryConfigId Int         @map("query_config_id")
+  queryConfig   QueryConfig @relation(fields: [queryConfigId], references: [id])
+  chartType     String      @map("chart_type") @db.VarChar(30)
+  chartConfig   Json        @map("chart_config")
+  position      Int         @default(0)
+  createdAt     DateTime    @default(now()) @map("created_at")
+
+  @@index([reportId])
+  @@map("report_widgets")
+}

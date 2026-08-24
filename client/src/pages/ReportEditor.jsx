@@ -1,0 +1,563 @@
+import { useEffect, useRef, useState } from 'react';
+import { Link, useNavigate, useParams } from 'react-router-dom';
+import { jsPDF } from 'jspdf';
+import html2canvas from 'html2canvas';
+import { useAuth } from '../context/AuthContext';
+import reportService from '../services/reportService';
+import dbConnectionService from '../services/dbConnectionService';
+import queryConfigService from '../services/queryConfigService';
+import ChartRenderer from '../components/ChartRenderer';
+import Spinner from '../components/Spinner';
+import WidgetFilterEditor from '../components/WidgetFilterEditor';
+import ReportPage from '../components/ReportPage';
+import { getApplicableChartTypes, pickChartType } from '../charts/chartAdapter';
+import { applyFilters } from '../charts/filterRows';
+import {
+  GRID_ROWS,
+  NEW_WIDGET_LAYOUT,
+  assignLegacyPages,
+  computeAddPlacement,
+  groupByPage,
+  isLegacyReport,
+} from '../reports/pagination';
+
+let widgetKeySeq = 0;
+function nextWidgetKey() {
+  widgetKeySeq += 1;
+  return `w${widgetKeySeq}`;
+}
+
+export default function ReportEditor() {
+  const { id } = useParams();
+  const isEditing = Boolean(id);
+  const navigate = useNavigate();
+  const { user, logout } = useAuth();
+
+  const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
+  const [widgets, setWidgets] = useState([]); // { key, queryConfigId, chartType, runResult, filters, layout: {page,x,y,w,h,minW,minH} }
+  const [loading, setLoading] = useState(isEditing);
+  const [loadError, setLoadError] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [openFilterKeys, setOpenFilterKeys] = useState(() => new Set());
+  const [saveError, setSaveError] = useState('');
+
+  const [dbConnections, setDbConnections] = useState([]);
+  const [pickerDbConnectionId, setPickerDbConnectionId] = useState('');
+  const [pickerQueryConfigs, setPickerQueryConfigs] = useState([]);
+  const [pickerQueryConfigId, setPickerQueryConfigId] = useState('');
+  const [pickerPreview, setPickerPreview] = useState(null);
+  const [pickerChartType, setPickerChartType] = useState('bar');
+  const [pickerLoading, setPickerLoading] = useState(false);
+  const [pickerError, setPickerError] = useState('');
+  const [exporting, setExporting] = useState(false);
+
+  const pageRefs = useRef([]); // DOM node của từng trang, dùng để xuất PDF theo từng trang
+
+  useEffect(() => {
+    dbConnectionService.list().then(setDbConnections).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!isEditing) return;
+    let cancelled = false;
+
+    async function load() {
+      setLoading(true);
+      setLoadError('');
+      try {
+        const report = await reportService.getById(id);
+        const results = await queryConfigService.runMany(
+          report.widgets.map((w) => w.queryConfigId)
+        );
+        if (cancelled) return;
+        setName(report.name);
+        setDescription(report.description || '');
+        const legacy = isLegacyReport(report);
+        const loaded = report.widgets.map((w, i) => ({
+          key: nextWidgetKey(),
+          queryConfigId: w.queryConfigId,
+          chartType: pickChartType(results[i], w.chartType),
+          runResult: results[i],
+          filters: w.chartConfig?.filters || [],
+          layout: w.chartConfig?.layout,
+        }));
+        setWidgets(legacy ? assignLegacyPages(loaded) : loaded);
+      } catch (err) {
+        if (!cancelled) {
+          setLoadError(err.response?.data?.error || 'Không tải được report');
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, [id, isEditing]);
+
+  function handlePickerDbConnectionChange(dbConnectionId) {
+    setPickerDbConnectionId(dbConnectionId);
+    setPickerQueryConfigId('');
+    setPickerPreview(null);
+    setPickerError('');
+    setPickerQueryConfigs([]);
+    if (!dbConnectionId) return;
+    queryConfigService
+      .listByDbConnectionId(dbConnectionId)
+      .then(setPickerQueryConfigs)
+      .catch((err) => setPickerError(err.response?.data?.error || 'Không tải được danh sách query'));
+  }
+
+  async function handlePickerPreview() {
+    if (!pickerQueryConfigId) return;
+    setPickerLoading(true);
+    setPickerError('');
+    setPickerPreview(null);
+    try {
+      const result = await queryConfigService.run(pickerQueryConfigId);
+      setPickerPreview(result);
+      setPickerChartType(pickChartType(result, result.suggestedChartType));
+    } catch (err) {
+      setPickerError(err.response?.data?.error || 'Không chạy được query');
+    } finally {
+      setPickerLoading(false);
+    }
+  }
+
+  function handleAddWidget() {
+    if (!pickerPreview) return;
+    const { page, y } = computeAddPlacement(groupByPage(widgets));
+    setWidgets((prev) => [
+      ...prev,
+      {
+        key: nextWidgetKey(),
+        queryConfigId: Number(pickerQueryConfigId),
+        chartType: pickerChartType,
+        runResult: pickerPreview,
+        filters: [],
+        layout: { page, x: 0, y, ...NEW_WIDGET_LAYOUT },
+      },
+    ]);
+    setPickerDbConnectionId('');
+    setPickerQueryConfigs([]);
+    setPickerQueryConfigId('');
+    setPickerPreview(null);
+  }
+
+  function toggleFilters(key) {
+    setOpenFilterKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  function handleRemoveWidget(key) {
+    setWidgets((prev) => prev.filter((w) => w.key !== key));
+  }
+
+  function handleWidgetChartTypeChange(key, chartType) {
+    setWidgets((prev) => prev.map((w) => (w.key === key ? { ...w, chartType } : w)));
+  }
+
+  function handleWidgetFiltersChange(key, filters) {
+    setWidgets((prev) => prev.map((w) => (w.key === key ? { ...w, filters } : w)));
+  }
+
+  // Chuyển widget sang trang trước/sau (direction = -1 hoặc +1). Đặt y:
+  // Infinity để tự xếp xuống cuối trang đích, giống cơ chế thêm widget mới.
+  // Nút "sang trang sau" ở widget cuối cùng của trang cuối cùng sẽ tạo trang
+  // mới (page = số trang hiện có), vì pages được suy ra từ max(page)+1.
+  function handleMovePage(key, direction) {
+    setWidgets((prev) =>
+      prev.map((w) =>
+        w.key === key
+          ? { ...w, layout: { ...w.layout, page: w.layout.page + direction, y: Infinity } }
+          : w
+      )
+    );
+  }
+
+  // jsPDF's built-in fonts (Helvetica/Times) chỉ có bảng WinAnsi/Latin-1,
+  // không có các ký tự có dấu tiếng Việt (ọ, ụ, ẩ...) nên doc.text() ra chữ
+  // lỗi font. Vẽ tiêu đề lên <canvas> rồi nhúng như ảnh thay vì gọi
+  // doc.text() — canvas dùng font hệ thống của trình duyệt, hỗ trợ Unicode
+  // đầy đủ (giống cách chart tự vẽ nhãn tiếng Việt vẫn đúng).
+  function titleImage(text) {
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    const fontPx = 28;
+    ctx.font = `bold ${fontPx}px Arial, sans-serif`;
+    canvas.width = Math.ceil(ctx.measureText(text).width) + 4;
+    canvas.height = fontPx + 10;
+    ctx.font = `bold ${fontPx}px Arial, sans-serif`; // resize canvas reset context, phải set lại
+    ctx.fillStyle = '#1f2933';
+    ctx.textBaseline = 'top';
+    ctx.fillText(text, 2, 2);
+    return canvas;
+  }
+
+  // Mỗi trang report đã đúng tỉ lệ 16:9 cố định (xem ReportPage) nên không
+  // cần thuật toán cắt lát pixel như trước — chụp riêng từng trang rồi mỗi
+  // ảnh thành đúng 1 trang PDF landscape.
+  async function handleExportPdf() {
+    if (widgets.length === 0) return;
+    setExporting(true);
+    try {
+      const doc = new jsPDF({ orientation: 'landscape' });
+      const pageWidth = doc.internal.pageSize.getWidth();
+      const pageHeight = doc.internal.pageSize.getHeight();
+      const margin = 15;
+
+      for (let i = 0; i < pageRefs.current.length; i += 1) {
+        const pageEl = pageRefs.current[i];
+        if (!pageEl) continue;
+
+        const canvas = await html2canvas(pageEl, {
+          backgroundColor: '#ffffff',
+          scale: 2,
+          // Report xuất ra chỉ nên có nội dung, không có control chỉnh sửa
+          // (dropdown loại chart, nút +/Xoá/↑/↓, panel điều kiện lọc).
+          ignoreElements: (el) =>
+            el.classList?.contains('widget-card-controls') ||
+            el.classList?.contains('widget-filter-editor'),
+        });
+
+        if (i > 0) doc.addPage(undefined, 'landscape');
+
+        let contentY = margin;
+        if (i === 0) {
+          const titleHeight = 8;
+          const title = titleImage(name || 'report');
+          const titleWidth = (title.width / title.height) * titleHeight;
+          doc.addImage(title.toDataURL('image/png'), 'PNG', margin, margin, titleWidth, titleHeight);
+          contentY = margin + titleHeight + 4;
+        }
+
+        const contentWidth = pageWidth - margin * 2;
+        const contentHeight = pageHeight - contentY - margin;
+        const imageAspect = canvas.width / canvas.height;
+        const boxAspect = contentWidth / contentHeight;
+        const drawWidth = imageAspect > boxAspect ? contentWidth : contentHeight * imageAspect;
+        const drawHeight = imageAspect > boxAspect ? contentWidth / imageAspect : contentHeight;
+
+        doc.addImage(canvas.toDataURL('image/png'), 'PNG', margin, contentY, drawWidth, drawHeight);
+      }
+
+      doc.save(`${name || 'report'}.pdf`);
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  // Guard so sánh giá trị trước khi setWidgets — react-grid-layout gọi
+  // onLayoutChange cả lúc mount lẫn sau compact; nếu luôn tạo object layout
+  // mới cho mọi widget thì mỗi render lại đổi reference của prop `layout`,
+  // khiến thư viện tưởng layout đổi và gọi lại onLayoutChange -> vòng lặp
+  // render vô hạn. Trả về đúng `prev` (cùng reference) khi không có gì đổi
+  // để React bỏ qua re-render. Chỉ xét widget thuộc đúng `pageIndex` vừa
+  // đổi — mỗi trang có instance grid + onLayoutChange riêng.
+  //
+  // isBounded/maxRows chỉ chặn widget đang được kéo/resize trực tiếp, không
+  // chặn các widget khác bị compactType="vertical" dồn xuống vượt đáy trang
+  // như hệ quả phụ. Widget nào rơi vào tình huống đó (y+h vượt GRID_ROWS)
+  // được tự chuyển sang đầu trang kế (y: Infinity, giống nút ↓) thay vì bị
+  // overflow:hidden của trang nuốt mất khỏi tầm nhìn — nếu trang kế cũng đầy,
+  // việc thêm widget vào đó lại tự kích hoạt onLayoutChange của trang kế,
+  // nên tự dồn tiếp sang trang sau nữa mà không cần đệ quy thủ công.
+  function handleGridLayoutChange(pageIndex, newLayout) {
+    setWidgets((prev) => {
+      let changed = false;
+      const next = prev.map((w) => {
+        if (w.layout.page !== pageIndex) return w;
+        const item = newLayout.find((l) => l.i === w.key);
+        if (!item) return w;
+        const overflowsPage = item.y + item.h > GRID_ROWS;
+        const same =
+          !overflowsPage &&
+          w.layout.x === item.x &&
+          w.layout.y === item.y &&
+          w.layout.w === item.w &&
+          w.layout.h === item.h;
+        if (same) return w;
+        changed = true;
+        return {
+          ...w,
+          layout: overflowsPage
+            ? { ...w.layout, page: pageIndex + 1, y: Infinity }
+            : { ...w.layout, x: item.x, y: item.y, w: item.w, h: item.h, minW: item.minW, minH: item.minH },
+        };
+      });
+      return changed ? next : prev;
+    });
+  }
+
+  async function handleSave() {
+    setSaving(true);
+    setSaveError('');
+    const payload = {
+      name,
+      description,
+      widgets: widgets.map((w) => ({
+        queryConfigId: w.queryConfigId,
+        chartType: w.chartType,
+        chartConfig: { filters: w.filters, layout: w.layout },
+      })),
+    };
+    try {
+      if (isEditing) {
+        await reportService.update(id, payload);
+      } else {
+        await reportService.create(payload);
+      }
+      navigate('/reports');
+    } catch (err) {
+      setSaveError(err.response?.data?.error || 'Không lưu được report');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function renderWidgetCard(w) {
+    return (
+      <div className="widget-card" key={w.key}>
+        <div className="query-result-header">
+          <h3 className="section-title">{w.runResult.name}</h3>
+          <div className="widget-card-controls">
+            <details className="widget-menu">
+              <summary className="ghost-button" title="Tuỳ chọn khác">
+                ⋯
+              </summary>
+              <div className="widget-menu-items">
+                <select
+                  className="chart-type-select"
+                  value={w.chartType}
+                  onChange={(e) => {
+                    e.target.closest('details').removeAttribute('open');
+                    handleWidgetChartTypeChange(w.key, e.target.value);
+                  }}
+                >
+                  {getApplicableChartTypes(w.runResult).map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  disabled={w.layout.page === 0}
+                  onClick={(e) => {
+                    e.currentTarget.closest('details').removeAttribute('open');
+                    handleMovePage(w.key, -1);
+                  }}
+                >
+                  ↑ Chuyển lên trang trước
+                </button>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.currentTarget.closest('details').removeAttribute('open');
+                    handleMovePage(w.key, 1);
+                  }}
+                >
+                  ↓ Chuyển xuống trang sau
+                </button>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.currentTarget.closest('details').removeAttribute('open');
+                    toggleFilters(w.key);
+                  }}
+                >
+                  {openFilterKeys.has(w.key) ? '✕ Ẩn điều kiện lọc' : '+ Điều kiện lọc'}
+                </button>
+                <button
+                  type="button"
+                  className="widget-menu-danger"
+                  onClick={(e) => {
+                    e.currentTarget.closest('details').removeAttribute('open');
+                    handleRemoveWidget(w.key);
+                  }}
+                >
+                  Xoá
+                </button>
+              </div>
+            </details>
+          </div>
+        </div>
+        {openFilterKeys.has(w.key) && (
+          <WidgetFilterEditor
+            columns={w.runResult.columns}
+            rows={w.runResult.rows}
+            filters={w.filters}
+            onChange={(filters) => handleWidgetFiltersChange(w.key, filters)}
+          />
+        )}
+        <ChartRenderer
+          runResult={applyFilters(w.runResult, w.filters)}
+          chartType={w.chartType}
+        />
+      </div>
+    );
+  }
+
+  const pages = groupByPage(widgets);
+
+  return (
+    <div className="placeholder-page">
+      <header className="placeholder-header">
+        <span className="auth-eyebrow">Dashboard Builder</span>
+        <nav className="top-nav">
+          <Link className="top-nav-link" to="/reports">
+            Reports
+          </Link>
+          <Link className="top-nav-link" to="/data-sources">
+            Nguồn dữ liệu
+          </Link>
+          <button className="ghost-button" onClick={logout}>
+            Đăng xuất ({user?.username})
+          </button>
+        </nav>
+      </header>
+
+      <Link className="back-link" to="/reports">
+        &larr; Quay lại danh sách report
+      </Link>
+
+      {loading && <Spinner label="Đang tải..." />}
+      {loadError && <p className="form-message error">{loadError}</p>}
+
+      {!loading && !loadError && (
+        <>
+          <div className="detail-card-wrap">
+            <div className="detail-card report-meta-form">
+              <div className="field">
+                <label htmlFor="report-name">Tên report</label>
+                <input
+                  id="report-name"
+                  type="text"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="report-description">Mô tả</label>
+                <input
+                  id="report-description"
+                  type="text"
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                />
+              </div>
+            </div>
+          </div>
+
+          <div className="widget-picker">
+            <h2 className="section-title">Thêm chart</h2>
+            <div className="widget-picker-row">
+              <select
+                className="chart-type-select"
+                value={pickerDbConnectionId}
+                onChange={(e) => handlePickerDbConnectionChange(e.target.value)}
+              >
+                <option value="">Chọn nguồn dữ liệu…</option>
+                {dbConnections.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+
+              <select
+                className="chart-type-select"
+                value={pickerQueryConfigId}
+                disabled={!pickerDbConnectionId}
+                onChange={(e) => setPickerQueryConfigId(e.target.value)}
+              >
+                <option value="">Chọn query…</option>
+                {pickerQueryConfigs.map((qc) => (
+                  <option key={qc.id} value={qc.id}>
+                    {qc.name}
+                  </option>
+                ))}
+              </select>
+
+              <button
+                className="ghost-button"
+                disabled={!pickerQueryConfigId || pickerLoading}
+                onClick={handlePickerPreview}
+              >
+                {pickerLoading ? 'Đang chạy...' : 'Xem trước'}
+              </button>
+            </div>
+
+            {pickerError && <p className="form-message error">{pickerError}</p>}
+
+            {pickerPreview && (
+              <div className="widget-picker-preview">
+                <div className="query-result-header">
+                  <h3 className="section-title">{pickerPreview.name}</h3>
+                  <select
+                    className="chart-type-select"
+                    value={pickerChartType}
+                    onChange={(e) => setPickerChartType(e.target.value)}
+                  >
+                    {getApplicableChartTypes(pickerPreview).map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <pre className="query-sql-block">
+                  <code>{pickerPreview.query}</code>
+                </pre>
+                <ChartRenderer runResult={pickerPreview} chartType={pickerChartType} />
+                <button className="primary-button" onClick={handleAddWidget}>
+                  Thêm vào report
+                </button>
+              </div>
+            )}
+          </div>
+
+          <div>
+            {pages.map((pageWidgets, pageIndex) => (
+              <ReportPage
+                key={pageIndex}
+                pageIndex={pageIndex}
+                widgets={pageWidgets}
+                onLayoutChange={handleGridLayoutChange}
+                pageRef={(el) => {
+                  pageRefs.current[pageIndex] = el;
+                }}
+                draggableCancel=".chart-type-select, .ghost-button, .primary-button, input, textarea, select, button"
+                renderWidget={renderWidgetCard}
+              />
+            ))}
+          </div>
+
+          {saveError && <p className="form-message error">{saveError}</p>}
+
+          <button
+            className="ghost-button"
+            disabled={exporting || widgets.length === 0}
+            onClick={handleExportPdf}
+          >
+            {exporting ? 'Đang xuất...' : 'Xuất PDF'}
+          </button>
+          <button
+            className="primary-button"
+            disabled={saving || !name.trim() || widgets.length === 0}
+            onClick={handleSave}
+          >
+            {saving ? 'Đang lưu...' : 'Lưu report'}
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
