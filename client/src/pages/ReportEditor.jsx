@@ -283,13 +283,38 @@ export default function ReportEditor() {
   // gốc của trình duyệt thay vì execCommand.
   function applyFontSizeToActiveTextWidget(px) {
     const { node, range } = activeTextEditorRef.current;
-    if (!node || !range || range.collapsed) return;
+    if (!node || !range) return;
     node.focus();
     const span = document.createElement('span');
     span.style.fontSize = `${px}px`;
-    span.appendChild(range.extractContents());
-    range.insertNode(span);
-    window.getSelection().removeAllRanges();
+
+    if (range.collapsed) {
+      // Chưa bôi đen gì (chỉ có con trỏ) — bold/italic/underline/color đi
+      // qua execCommand nên trình duyệt tự áp dụng cho chữ gõ TIẾP THEO dù
+      // chưa chọn gì; font-size không đi qua execCommand nên phải tự dựng 1
+      // span rỗng (chứa 1 zero-width space để có chỗ đặt con trỏ VÀO
+      // TRONG, span thật sự rỗng thì trình duyệt không cho đặt con trỏ bên
+      // trong) rồi đặt con trỏ vào đó — chữ gõ tiếp theo sẽ rơi vào trong
+      // span này, tự nhận đúng cỡ.
+      span.appendChild(document.createTextNode('​'));
+      range.insertNode(span);
+      const caretRange = document.createRange();
+      caretRange.setStart(span.firstChild, 1);
+      caretRange.collapse(true);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(caretRange);
+    } else {
+      span.appendChild(range.extractContents());
+      range.insertNode(span);
+      window.getSelection().removeAllRanges();
+    }
+
+    // Marker của bullet (•) lấy cỡ chữ từ chính thẻ <li>, không kế thừa từ
+    // span lồng bên trong — nếu không set thêm ở đây, bullet sẽ giữ nguyên
+    // cỡ mặc định dù chữ trong đó đã to lên.
+    const li = span.closest('li');
+    if (li) li.style.fontSize = `${px}px`;
   }
 
   function toggleFilters(key) {
@@ -722,8 +747,9 @@ export default function ReportEditor() {
               <input
                 type="number"
                 className="text-widget-size-input"
-                title="Cỡ chữ (px)"
+                title="Cỡ chữ (px) — gõ số tuỳ ý hoặc chọn từ danh sách"
                 placeholder="Cỡ (px)"
+                list="text-widget-size-list"
                 min="6"
                 max="300"
                 disabled={!hasActiveTextEditor}
@@ -735,6 +761,13 @@ export default function ReportEditor() {
                   e.target.value = '';
                 }}
               />
+              <datalist id="text-widget-size-list">
+                {[8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 44, 48, 54, 60, 66, 72, 80, 88, 96].map(
+                  (size) => (
+                    <option key={size} value={size} />
+                  )
+                )}
+              </datalist>
               <input
                 type="color"
                 title="Màu chữ"
