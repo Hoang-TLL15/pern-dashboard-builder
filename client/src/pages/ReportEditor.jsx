@@ -10,6 +10,7 @@ import ChartRenderer from '../components/ChartRenderer';
 import Spinner from '../components/Spinner';
 import WidgetFilterEditor from '../components/WidgetFilterEditor';
 import ReportPage from '../components/ReportPage';
+import TextWidgetEditor from '../components/TextWidgetEditor';
 import { getApplicableChartTypes, pickChartType } from '../charts/chartAdapter';
 import { applyFilters } from '../charts/filterRows';
 import {
@@ -129,21 +130,39 @@ export default function ReportEditor() {
       setLoadError('');
       try {
         const report = await reportService.getById(id);
-        const results = await queryConfigService.runMany(
-          report.widgets.map((w) => w.queryConfigId)
-        );
+        const chartIndices = report.widgets
+          .map((w, i) => ((w.widgetType ?? 'chart') === 'chart' ? i : -1))
+          .filter((i) => i !== -1);
+        const chartResults =
+          chartIndices.length > 0
+            ? await queryConfigService.runMany(chartIndices.map((i) => report.widgets[i].queryConfigId))
+            : [];
+        const resultByIndex = new Map(chartIndices.map((origIdx, j) => [origIdx, chartResults[j]]));
         if (cancelled) return;
         setName(report.name);
         setDescription(report.description || '');
         const legacy = isLegacyReport(report);
-        const loaded = report.widgets.map((w, i) => ({
-          key: nextWidgetKey(),
-          queryConfigId: w.queryConfigId,
-          chartType: pickChartType(results[i], w.chartType),
-          runResult: results[i],
-          filters: w.chartConfig?.filters || [],
-          layout: w.chartConfig?.layout,
-        }));
+        const loaded = report.widgets.map((w, i) => {
+          const widgetType = w.widgetType ?? 'chart';
+          if (widgetType === 'text') {
+            return {
+              key: nextWidgetKey(),
+              widgetType: 'text',
+              text: w.chartConfig?.text || '',
+              layout: w.chartConfig?.layout,
+            };
+          }
+          const result = resultByIndex.get(i);
+          return {
+            key: nextWidgetKey(),
+            widgetType: 'chart',
+            queryConfigId: w.queryConfigId,
+            chartType: pickChartType(result, w.chartType),
+            runResult: result,
+            filters: w.chartConfig?.filters || [],
+            layout: w.chartConfig?.layout,
+          };
+        });
         setWidgets(legacy ? assignLegacyPages(loaded) : loaded);
       } catch (err) {
         if (!cancelled) {
@@ -207,6 +226,23 @@ export default function ReportEditor() {
     setPickerQueryConfigs([]);
     setPickerQueryConfigId('');
     setPickerPreview(null);
+  }
+
+  function handleAddTextWidget() {
+    const { page, y } = computeAddPlacement(groupByPage(widgets));
+    setWidgets((prev) => [
+      ...prev,
+      {
+        key: nextWidgetKey(),
+        widgetType: 'text',
+        text: '',
+        layout: { page, x: 0, y, ...NEW_WIDGET_LAYOUT },
+      },
+    ]);
+  }
+
+  function handleWidgetTextChange(key, html) {
+    setWidgets((prev) => prev.map((w) => (w.key === key ? { ...w, text: html } : w)));
   }
 
   function toggleFilters(key) {
@@ -286,7 +322,8 @@ export default function ReportEditor() {
           // (dropdown loại chart, nút +/Xoá/↑/↓, panel điều kiện lọc).
           ignoreElements: (el) =>
             el.classList?.contains('widget-card-controls') ||
-            el.classList?.contains('widget-filter-editor'),
+            el.classList?.contains('widget-filter-editor') ||
+            el.classList?.contains('text-widget-toolbar'),
         });
 
         if (i > 0) doc.addPage(undefined, 'landscape');
@@ -364,11 +401,17 @@ export default function ReportEditor() {
     const payload = {
       name,
       description,
-      widgets: widgets.map((w) => ({
-        queryConfigId: w.queryConfigId,
-        chartType: w.chartType,
-        chartConfig: { filters: w.filters, layout: w.layout },
-      })),
+      widgets: widgets.map((w) => {
+        const widgetType = w.widgetType ?? 'chart';
+        if (widgetType === 'text') {
+          return { widgetType: 'text', chartConfig: { text: w.text, layout: w.layout } };
+        }
+        return {
+          queryConfigId: w.queryConfigId,
+          chartType: w.chartType,
+          chartConfig: { filters: w.filters, layout: w.layout },
+        };
+      }),
     };
     try {
       if (isEditing) {
@@ -385,10 +428,11 @@ export default function ReportEditor() {
   }
 
   function renderWidgetCard(w, { hideControls = false } = {}) {
+    const widgetType = w.widgetType ?? 'chart';
     return (
       <div className="widget-card" key={w.key}>
         <div className="query-result-header">
-          <h3 className="section-title">{w.runResult.name}</h3>
+          {widgetType === 'chart' && <h3 className="section-title">{w.runResult.name}</h3>}
           {!hideControls && (
           <div className="widget-card-controls">
             <details className="widget-menu">
@@ -396,20 +440,22 @@ export default function ReportEditor() {
                 ⋯
               </summary>
               <div className="widget-menu-items">
-                <select
-                  className="chart-type-select"
-                  value={w.chartType}
-                  onChange={(e) => {
-                    e.target.closest('details').removeAttribute('open');
-                    handleWidgetChartTypeChange(w.key, e.target.value);
-                  }}
-                >
-                  {getApplicableChartTypes(w.runResult).map((opt) => (
-                    <option key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
+                {widgetType === 'chart' && (
+                  <select
+                    className="chart-type-select"
+                    value={w.chartType}
+                    onChange={(e) => {
+                      e.target.closest('details').removeAttribute('open');
+                      handleWidgetChartTypeChange(w.key, e.target.value);
+                    }}
+                  >
+                    {getApplicableChartTypes(w.runResult).map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                )}
                 <button
                   type="button"
                   disabled={w.layout.page === 0}
@@ -429,15 +475,17 @@ export default function ReportEditor() {
                 >
                   ↓ Chuyển xuống trang sau
                 </button>
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.currentTarget.closest('details').removeAttribute('open');
-                    toggleFilters(w.key);
-                  }}
-                >
-                  {openFilterKeys.has(w.key) ? '✕ Ẩn điều kiện lọc' : '+ Điều kiện lọc'}
-                </button>
+                {widgetType === 'chart' && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.currentTarget.closest('details').removeAttribute('open');
+                      toggleFilters(w.key);
+                    }}
+                  >
+                    {openFilterKeys.has(w.key) ? '✕ Ẩn điều kiện lọc' : '+ Điều kiện lọc'}
+                  </button>
+                )}
                 <button
                   type="button"
                   className="widget-menu-danger"
@@ -453,7 +501,7 @@ export default function ReportEditor() {
           </div>
           )}
         </div>
-        {!hideControls && openFilterKeys.has(w.key) && (
+        {widgetType === 'chart' && !hideControls && openFilterKeys.has(w.key) && (
           <WidgetFilterEditor
             columns={w.runResult.columns}
             rows={w.runResult.rows}
@@ -461,10 +509,15 @@ export default function ReportEditor() {
             onChange={(filters) => handleWidgetFiltersChange(w.key, filters)}
           />
         )}
-        <ChartRenderer
-          runResult={applyFilters(w.runResult, w.filters)}
-          chartType={w.chartType}
-        />
+        {widgetType === 'chart' ? (
+          <ChartRenderer runResult={applyFilters(w.runResult, w.filters)} chartType={w.chartType} />
+        ) : (
+          <TextWidgetEditor
+            html={w.text}
+            editable={!hideControls}
+            onChange={(html) => handleWidgetTextChange(w.key, html)}
+          />
+        )}
       </div>
     );
   }
@@ -585,6 +638,10 @@ export default function ReportEditor() {
               </div>
             )}
           </div>
+
+          <button type="button" className="ghost-button" onClick={handleAddTextWidget}>
+            + Thêm widget chữ
+          </button>
 
           <div className="report-pages-toolbar">
             <button type="button" className="ghost-button" disabled={widgets.length === 0} onClick={handlePresent}>
