@@ -740,6 +740,7 @@
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
+  margin-left: auto;
 }
 
 .widget-menu {
@@ -791,6 +792,49 @@
 
 .widget-menu-items button.widget-menu-danger {
   color: #c0392b;
+}
+
+.text-widget-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.text-widget-toolbar {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.text-widget-toolbar button {
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: 13px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.text-widget-toolbar button:hover {
+  background: var(--color-border);
+}
+
+.text-widget-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  outline: none;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--color-text);
+}
+
+.text-widget-content ul {
+  margin: 0;
+  padding-left: 20px;
 }
 
 .widget-filter-editor {
