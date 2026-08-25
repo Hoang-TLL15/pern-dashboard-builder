@@ -56,6 +56,28 @@ function getRangeFontSize(range) {
   return parseInt([...sizes][0], 10) || '';
 }
 
+// Marker của bullet (•) lấy cỡ chữ từ chính thẻ <li>, không tự kế thừa từ
+// span lồng bên trong nó — nếu không set thêm, bullet luôn giữ cỡ mặc định
+// dù chữ bên trong đã to lên, BẤT KỂ thứ tự thao tác (chỉnh cỡ trước rồi
+// mới bấm List, hay bấm List trước rồi mới chỉnh cỡ). Nên không gắn cố
+// định vào 1 chỗ gọi — quét lại mọi <li> trong `root`, set cỡ theo cỡ LỚN
+// NHẤT đang có trong nội dung của chính nó, gọi lại sau cả 2 thao tác.
+function syncListItemFontSizes(root) {
+  root.querySelectorAll('li').forEach((li) => {
+    const walker = document.createTreeWalker(li, NodeFilter.SHOW_TEXT);
+    let max = 0;
+    let node = walker.nextNode();
+    while (node) {
+      if (node.textContent.trim() !== '') {
+        const size = parseInt(getComputedStyle(node.parentElement).fontSize, 10) || 0;
+        if (size > max) max = size;
+      }
+      node = walker.nextNode();
+    }
+    if (max > 0) li.style.fontSize = `${max}px`;
+  });
+}
+
 export default function ReportEditor() {
   const { id } = useParams();
   const isEditing = Boolean(id);
@@ -313,6 +335,10 @@ export default function ReportEditor() {
     // thay vì <b>/<i>/<u>, không khớp allowlist và bị sanitizer strip mất.
     document.execCommand('styleWithCSS', false, command === 'foreColor');
     document.execCommand(command, false, value);
+
+    // Bấm "• List" SAU KHI chữ đã có cỡ riêng: <li> vừa tạo ra không tự
+    // nhận cỡ chữ của nội dung bên trong — đồng bộ lại ngay.
+    if (command === 'insertUnorderedList') syncListItemFontSizes(node);
   }
 
   // execCommand('fontSize') chỉ hỗ trợ 7 mức cố định, không ra đúng số px —
@@ -360,11 +386,7 @@ export default function ReportEditor() {
       window.getSelection().removeAllRanges();
     }
 
-    // Marker của bullet (•) lấy cỡ chữ từ chính thẻ <li>, không kế thừa từ
-    // span lồng bên trong — nếu không set thêm ở đây, bullet sẽ giữ nguyên
-    // cỡ mặc định dù chữ trong đó đã to lên.
-    const li = span.closest('li');
-    if (li) li.style.fontSize = `${px}px`;
+    syncListItemFontSizes(node);
   }
 
   function toggleFilters(key) {
