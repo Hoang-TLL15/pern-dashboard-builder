@@ -70,15 +70,16 @@ model Report {
 }
 
 model ReportWidget {
-  id            Int         @id @default(autoincrement())
-  reportId      Int         @map("report_id")
-  report        Report      @relation(fields: [reportId], references: [id], onDelete: Cascade)
-  queryConfigId Int         @map("query_config_id")
-  queryConfig   QueryConfig @relation(fields: [queryConfigId], references: [id])
-  chartType     String      @map("chart_type") @db.VarChar(30)
-  chartConfig   Json        @map("chart_config")
-  position      Int         @default(0)
-  createdAt     DateTime    @default(now()) @map("created_at")
+  id            Int          @id @default(autoincrement())
+  reportId      Int          @map("report_id")
+  report        Report       @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  widgetType    String       @default("chart") @map("widget_type") @db.VarChar(20)
+  queryConfigId Int?         @map("query_config_id")
+  queryConfig   QueryConfig? @relation(fields: [queryConfigId], references: [id])
+  chartType     String?      @map("chart_type") @db.VarChar(30)
+  chartConfig   Json         @map("chart_config")
+  position      Int          @default(0)
+  createdAt     DateTime     @default(now()) @map("created_at")
 
   @@index([reportId])
   @@map("report_widgets")

@@ -46,9 +46,10 @@ CREATE INDEX idx_reports_user_id ON reports(user_id);
 CREATE TABLE report_widgets (
     id SERIAL PRIMARY KEY,
     report_id INTEGER NOT NULL REFERENCES reports(id) ON DELETE CASCADE,
-    query_config_id INTEGER NOT NULL REFERENCES query_configs(id),
-    chart_type VARCHAR(30) NOT NULL,
-    chart_config JSONB NOT NULL, -- shape khác nhau tuỳ chart_type (mục 6)
+    widget_type VARCHAR(20) NOT NULL DEFAULT 'chart',
+    query_config_id INTEGER REFERENCES query_configs(id),
+    chart_type VARCHAR(30),
+    chart_config JSONB NOT NULL, -- shape khác nhau tuỳ widget_type/chart_type (mục 6)
     position INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMP NOT NULL DEFAULT now()
 );
