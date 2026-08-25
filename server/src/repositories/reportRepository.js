@@ -40,6 +40,7 @@ async function createForUser(userId, { name, description, widgets }) {
       description,
       widgets: {
         create: widgets.map((w, i) => ({
+          widgetType: w.widgetType,
           queryConfigId: w.queryConfigId,
           chartType: w.chartType,
           chartConfig: w.chartConfig,
@@ -68,6 +69,7 @@ async function updateForUser(id, userId, { name, description, widgets }) {
         updatedAt: new Date(),
         widgets: {
           create: widgets.map((w, i) => ({
+            widgetType: w.widgetType,
             queryConfigId: w.queryConfigId,
             chartType: w.chartType,
             chartConfig: w.chartConfig,

@@ -4,6 +4,12 @@
 export const GRID_COLS = 24;
 export const GRID_ROWS = 36;
 export const NEW_WIDGET_LAYOUT = { w: 12, h: 10, minW: 2, minH: 4 };
+// Widget chữ mặc định thấp hơn nhiều so với chart — 1 dòng tiêu đề/kết luận
+// không cần cao 10 hàng như chart, để trống nhiều khoảng trắng trên dưới.
+// minH cũng hạ theo để có thể kéo nhỏ hơn nữa. h=2 từng bị thử nhưng hụt
+// mất 1px chiều cao thật cần cho 1 dòng chữ (clientHeight < scrollHeight,
+// đo trực tiếp trên trình duyệt) — h=3 mới đủ khít mà không cắt chữ.
+export const NEW_TEXT_WIDGET_LAYOUT = { w: 12, h: 3, minW: 2, minH: 3 };
 
 const LEGACY_WIDGET_LAYOUT = { w: GRID_COLS, h: 10, minW: 3, minH: 4 };
 

@@ -33,6 +33,19 @@ function validateWidgets(widgets) {
   }
 
   return widgets.map((w) => {
+    if (typeof w.chartConfig !== 'object' || w.chartConfig === null || Array.isArray(w.chartConfig)) {
+      throw new AppError('widget.chartConfig phải là 1 object', 400);
+    }
+
+    const widgetType = w.widgetType === 'text' ? 'text' : 'chart';
+
+    if (widgetType === 'text') {
+      if (typeof w.chartConfig.text !== 'string') {
+        throw new AppError('widget.chartConfig.text không hợp lệ', 400);
+      }
+      return { widgetType: 'text', queryConfigId: null, chartType: null, chartConfig: w.chartConfig };
+    }
+
     const queryConfigId = Number(w.queryConfigId);
     if (!Number.isInteger(queryConfigId)) {
       throw new AppError('widget.queryConfigId không hợp lệ', 400);
@@ -40,10 +53,7 @@ function validateWidgets(widgets) {
     if (!ALLOWED_CHART_TYPES.includes(w.chartType)) {
       throw new AppError(`widget.chartType không hợp lệ: ${w.chartType}`, 400);
     }
-    if (typeof w.chartConfig !== 'object' || w.chartConfig === null || Array.isArray(w.chartConfig)) {
-      throw new AppError('widget.chartConfig phải là 1 object', 400);
-    }
-    return { queryConfigId, chartType: w.chartType, chartConfig: w.chartConfig };
+    return { widgetType: 'chart', queryConfigId, chartType: w.chartType, chartConfig: w.chartConfig };
   });
 }
 

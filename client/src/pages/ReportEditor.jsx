@@ -10,11 +10,13 @@ import ChartRenderer from '../components/ChartRenderer';
 import Spinner from '../components/Spinner';
 import WidgetFilterEditor from '../components/WidgetFilterEditor';
 import ReportPage from '../components/ReportPage';
+import TextWidgetEditor from '../components/TextWidgetEditor';
 import { getApplicableChartTypes, pickChartType } from '../charts/chartAdapter';
 import { applyFilters } from '../charts/filterRows';
 import {
   GRID_ROWS,
   NEW_WIDGET_LAYOUT,
+  NEW_TEXT_WIDGET_LAYOUT,
   assignLegacyPages,
   computeAddPlacement,
   groupByPage,
@@ -25,6 +27,60 @@ let widgetKeySeq = 0;
 function nextWidgetKey() {
   widgetKeySeq += 1;
   return `w${widgetKeySeq}`;
+}
+
+// Các mốc cỡ chữ chuẩn của Word, dùng cho dropdown chọn nhanh (ô "Cỡ" vẫn
+// gõ được số tuỳ ý — dropdown chỉ là gợi ý nhanh, không giới hạn giá trị).
+const FONT_SIZE_PRESETS = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 44, 48, 54, 60, 66, 72, 80, 88, 96];
+
+// Đọc cỡ chữ (px) thật của 1 Range để hiển thị lên ô "Cỡ" — giống Word:
+// con trỏ (range rỗng) trả về cỡ tại đúng vị trí đó; có bôi đen thì duyệt
+// mọi text node nằm trong vùng chọn, nếu tất cả CÙNG 1 cỡ mới trả về cỡ đó,
+// khác nhau thì trả về '' (rỗng). Dùng getComputedStyle nên tự tính đúng cả
+// chữ chưa từng chỉnh cỡ (kế thừa từ CSS mặc định), không chỉ chữ có
+// style="font-size" tường minh.
+function getRangeFontSize(range) {
+  if (!range) return '';
+  if (range.collapsed) {
+    const container = range.startContainer;
+    const el = container.nodeType === Node.TEXT_NODE ? container.parentElement : container;
+    if (!el) return '';
+    return parseInt(getComputedStyle(el).fontSize, 10) || '';
+  }
+  const sizes = new Set();
+  const root = range.commonAncestorContainer;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let node = root.nodeType === Node.TEXT_NODE ? root : walker.nextNode();
+  while (node) {
+    if (node.textContent.trim() !== '' && range.intersectsNode(node)) {
+      sizes.add(getComputedStyle(node.parentElement).fontSize);
+    }
+    node = walker.nextNode();
+  }
+  if (sizes.size !== 1) return '';
+  return parseInt([...sizes][0], 10) || '';
+}
+
+// Marker của bullet (•) lấy cỡ chữ từ chính thẻ <li>, không tự kế thừa từ
+// span lồng bên trong nó — nếu không set thêm, bullet luôn giữ cỡ mặc định
+// dù chữ bên trong đã to lên, BẤT KỂ thứ tự thao tác (chỉnh cỡ trước rồi
+// mới bấm List, hay bấm List trước rồi mới chỉnh cỡ). Nên không gắn cố
+// định vào 1 chỗ gọi — quét lại mọi <li> trong `root`, set cỡ theo cỡ LỚN
+// NHẤT đang có trong nội dung của chính nó, gọi lại sau cả 2 thao tác.
+function syncListItemFontSizes(root) {
+  root.querySelectorAll('li').forEach((li) => {
+    const walker = document.createTreeWalker(li, NodeFilter.SHOW_TEXT);
+    let max = 0;
+    let node = walker.nextNode();
+    while (node) {
+      if (node.textContent.trim() !== '') {
+        const size = parseInt(getComputedStyle(node.parentElement).fontSize, 10) || 0;
+        if (size > max) max = size;
+      }
+      node = walker.nextNode();
+    }
+    if (max > 0) li.style.fontSize = `${max}px`;
+  });
 }
 
 export default function ReportEditor() {
@@ -57,6 +113,19 @@ export default function ReportEditor() {
 
   const pageRefs = useRef([]); // DOM node của từng trang, dùng để xuất PDF theo từng trang
   const presentRef = useRef(null);
+
+  // Widget chữ đang được chọn/sửa gần nhất — toolbar định dạng dùng chung
+  // (không nằm trong từng widget) tác động vào đây. Dùng ref (không phải
+  // state) cho chính node/range vì không cần re-render khi nó đổi; chỉ có
+  // "đã từng active hay chưa" mới cần state để bật/tắt toolbar.
+  const activeTextEditorRef = useRef({ node: null, range: null });
+  const [hasActiveTextEditor, setHasActiveTextEditor] = useState(false);
+  // Cỡ chữ hiển thị trong ô "Cỡ" — phản ánh đúng vùng chọn hiện tại, giống
+  // Word: rỗng nếu vùng chọn gồm nhiều cỡ khác nhau. activeFontSizeRef giữ
+  // giá trị đã đồng bộ gần nhất để so sánh lúc blur, tránh áp lại 1 giá trị
+  // người dùng không hề gõ (chỉ click vào ô rồi click ra).
+  const [activeFontSize, setActiveFontSize] = useState('');
+  const activeFontSizeRef = useRef('');
 
   const pages = groupByPage(widgets);
   const isPresenting = presentPageIndex !== null;
@@ -129,21 +198,39 @@ export default function ReportEditor() {
       setLoadError('');
       try {
         const report = await reportService.getById(id);
-        const results = await queryConfigService.runMany(
-          report.widgets.map((w) => w.queryConfigId)
-        );
+        const chartIndices = report.widgets
+          .map((w, i) => ((w.widgetType ?? 'chart') === 'chart' ? i : -1))
+          .filter((i) => i !== -1);
+        const chartResults =
+          chartIndices.length > 0
+            ? await queryConfigService.runMany(chartIndices.map((i) => report.widgets[i].queryConfigId))
+            : [];
+        const resultByIndex = new Map(chartIndices.map((origIdx, j) => [origIdx, chartResults[j]]));
         if (cancelled) return;
         setName(report.name);
         setDescription(report.description || '');
         const legacy = isLegacyReport(report);
-        const loaded = report.widgets.map((w, i) => ({
-          key: nextWidgetKey(),
-          queryConfigId: w.queryConfigId,
-          chartType: pickChartType(results[i], w.chartType),
-          runResult: results[i],
-          filters: w.chartConfig?.filters || [],
-          layout: w.chartConfig?.layout,
-        }));
+        const loaded = report.widgets.map((w, i) => {
+          const widgetType = w.widgetType ?? 'chart';
+          if (widgetType === 'text') {
+            return {
+              key: nextWidgetKey(),
+              widgetType: 'text',
+              text: w.chartConfig?.text || '',
+              layout: w.chartConfig?.layout,
+            };
+          }
+          const result = resultByIndex.get(i);
+          return {
+            key: nextWidgetKey(),
+            widgetType: 'chart',
+            queryConfigId: w.queryConfigId,
+            chartType: pickChartType(result, w.chartType),
+            runResult: result,
+            filters: w.chartConfig?.filters || [],
+            layout: w.chartConfig?.layout,
+          };
+        });
         setWidgets(legacy ? assignLegacyPages(loaded) : loaded);
       } catch (err) {
         if (!cancelled) {
@@ -207,6 +294,100 @@ export default function ReportEditor() {
     setPickerQueryConfigs([]);
     setPickerQueryConfigId('');
     setPickerPreview(null);
+  }
+
+  function handleAddTextWidget() {
+    const { page, y } = computeAddPlacement(groupByPage(widgets));
+    setWidgets((prev) => [
+      ...prev,
+      {
+        key: nextWidgetKey(),
+        widgetType: 'text',
+        text: '',
+        layout: { page, x: 0, y, ...NEW_TEXT_WIDGET_LAYOUT },
+      },
+    ]);
+  }
+
+  function handleWidgetTextChange(key, html) {
+    setWidgets((prev) => prev.map((w) => (w.key === key ? { ...w, text: html } : w)));
+  }
+
+  function handleTextWidgetActivate(node, range) {
+    activeTextEditorRef.current = { node, range };
+    setHasActiveTextEditor(true);
+    const size = getRangeFontSize(range);
+    activeFontSizeRef.current = size;
+    setActiveFontSize(size);
+  }
+
+  // Khôi phục đúng con trỏ/vùng chọn của widget chữ đang active trước khi
+  // gọi execCommand — toolbar giờ nằm ngoài widget nên bấm nút luôn làm
+  // widget mất focus, phải tự set lại selection cho execCommand tác động
+  // đúng chỗ.
+  function execOnActiveTextWidget(command, value) {
+    const { node, range } = activeTextEditorRef.current;
+    if (!node) return;
+    node.focus();
+    if (range) {
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+    // styleWithCSS là toggle chung của cả document — chỉ bật cho foreColor
+    // (để ra <span style="color:...">, khớp sanitizer) — bật chung cho mọi
+    // command sẽ khiến bold/italic/underline ra <span style="font-weight:...">
+    // thay vì <b>/<i>/<u>, không khớp allowlist và bị sanitizer strip mất.
+    document.execCommand('styleWithCSS', false, command === 'foreColor');
+    document.execCommand(command, false, value);
+  }
+
+  // execCommand('fontSize') chỉ hỗ trợ 7 mức cố định, không ra đúng số px —
+  // tự bọc vùng chọn trong 1 <span style="font-size:...px"> bằng Range API
+  // gốc của trình duyệt thay vì execCommand.
+  function applyFontSizeToActiveTextWidget(px) {
+    const { node, range } = activeTextEditorRef.current;
+    if (!node || !range) return;
+    node.focus();
+    const span = document.createElement('span');
+    span.style.fontSize = `${px}px`;
+
+    if (range.collapsed) {
+      // Chưa bôi đen gì (chỉ có con trỏ) — bold/italic/underline/color đi
+      // qua execCommand nên trình duyệt tự áp dụng cho chữ gõ TIẾP THEO dù
+      // chưa chọn gì; font-size không đi qua execCommand nên phải tự dựng 1
+      // span rỗng (chứa 1 zero-width space để có chỗ đặt con trỏ VÀO
+      // TRONG, span thật sự rỗng thì trình duyệt không cho đặt con trỏ bên
+      // trong) rồi đặt con trỏ vào đó — chữ gõ tiếp theo sẽ rơi vào trong
+      // span này, tự nhận đúng cỡ.
+      span.appendChild(document.createTextNode('​'));
+      range.insertNode(span);
+      const caretRange = document.createRange();
+      caretRange.setStart(span.firstChild, 1);
+      caretRange.collapse(true);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(caretRange);
+    } else {
+      const extracted = range.extractContents();
+      // Nếu vùng chọn đang có nhiều cỡ chữ khác nhau (do từng chỉnh riêng
+      // lẻ trước đó), các span/li lồng bên trong VẪN giữ font-size riêng
+      // của chúng — font-size của span mới bọc ngoài không đè được lên vì
+      // 1 phần tử luôn ưu tiên font-size trên chính nó hơn là kế thừa từ
+      // cha. Phải xoá font-size khỏi mọi phần tử lồng bên trong trước, để
+      // toàn bộ vùng chọn thật sự về cùng 1 cỡ mới duy nhất.
+      const walker = document.createTreeWalker(extracted, NodeFilter.SHOW_ELEMENT);
+      let el = walker.nextNode();
+      while (el) {
+        el.style.removeProperty('font-size');
+        el = walker.nextNode();
+      }
+      span.appendChild(extracted);
+      range.insertNode(span);
+      window.getSelection().removeAllRanges();
+    }
+
+    syncListItemFontSizes(node);
   }
 
   function toggleFilters(key) {
@@ -364,11 +545,17 @@ export default function ReportEditor() {
     const payload = {
       name,
       description,
-      widgets: widgets.map((w) => ({
-        queryConfigId: w.queryConfigId,
-        chartType: w.chartType,
-        chartConfig: { filters: w.filters, layout: w.layout },
-      })),
+      widgets: widgets.map((w) => {
+        const widgetType = w.widgetType ?? 'chart';
+        if (widgetType === 'text') {
+          return { widgetType: 'text', chartConfig: { text: w.text, layout: w.layout } };
+        }
+        return {
+          queryConfigId: w.queryConfigId,
+          chartType: w.chartType,
+          chartConfig: { filters: w.filters, layout: w.layout },
+        };
+      }),
     };
     try {
       if (isEditing) {
@@ -385,10 +572,11 @@ export default function ReportEditor() {
   }
 
   function renderWidgetCard(w, { hideControls = false } = {}) {
+    const widgetType = w.widgetType ?? 'chart';
     return (
-      <div className="widget-card" key={w.key}>
+      <div className={widgetType === 'text' ? 'widget-card widget-card-text' : 'widget-card'} key={w.key}>
         <div className="query-result-header">
-          <h3 className="section-title">{w.runResult.name}</h3>
+          {widgetType === 'chart' && <h3 className="section-title">{w.runResult.name}</h3>}
           {!hideControls && (
           <div className="widget-card-controls">
             <details className="widget-menu">
@@ -396,20 +584,22 @@ export default function ReportEditor() {
                 ⋯
               </summary>
               <div className="widget-menu-items">
-                <select
-                  className="chart-type-select"
-                  value={w.chartType}
-                  onChange={(e) => {
-                    e.target.closest('details').removeAttribute('open');
-                    handleWidgetChartTypeChange(w.key, e.target.value);
-                  }}
-                >
-                  {getApplicableChartTypes(w.runResult).map((opt) => (
-                    <option key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
+                {widgetType === 'chart' && (
+                  <select
+                    className="chart-type-select"
+                    value={w.chartType}
+                    onChange={(e) => {
+                      e.target.closest('details').removeAttribute('open');
+                      handleWidgetChartTypeChange(w.key, e.target.value);
+                    }}
+                  >
+                    {getApplicableChartTypes(w.runResult).map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                )}
                 <button
                   type="button"
                   disabled={w.layout.page === 0}
@@ -429,15 +619,17 @@ export default function ReportEditor() {
                 >
                   ↓ Chuyển xuống trang sau
                 </button>
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.currentTarget.closest('details').removeAttribute('open');
-                    toggleFilters(w.key);
-                  }}
-                >
-                  {openFilterKeys.has(w.key) ? '✕ Ẩn điều kiện lọc' : '+ Điều kiện lọc'}
-                </button>
+                {widgetType === 'chart' && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.currentTarget.closest('details').removeAttribute('open');
+                      toggleFilters(w.key);
+                    }}
+                  >
+                    {openFilterKeys.has(w.key) ? '✕ Ẩn điều kiện lọc' : '+ Điều kiện lọc'}
+                  </button>
+                )}
                 <button
                   type="button"
                   className="widget-menu-danger"
@@ -453,7 +645,7 @@ export default function ReportEditor() {
           </div>
           )}
         </div>
-        {!hideControls && openFilterKeys.has(w.key) && (
+        {widgetType === 'chart' && !hideControls && openFilterKeys.has(w.key) && (
           <WidgetFilterEditor
             columns={w.runResult.columns}
             rows={w.runResult.rows}
@@ -461,10 +653,16 @@ export default function ReportEditor() {
             onChange={(filters) => handleWidgetFiltersChange(w.key, filters)}
           />
         )}
-        <ChartRenderer
-          runResult={applyFilters(w.runResult, w.filters)}
-          chartType={w.chartType}
-        />
+        {widgetType === 'chart' ? (
+          <ChartRenderer runResult={applyFilters(w.runResult, w.filters)} chartType={w.chartType} />
+        ) : (
+          <TextWidgetEditor
+            html={w.text}
+            editable={!hideControls}
+            onChange={(html) => handleWidgetTextChange(w.key, html)}
+            onActivate={handleTextWidgetActivate}
+          />
+        )}
       </div>
     );
   }
@@ -586,6 +784,118 @@ export default function ReportEditor() {
             )}
           </div>
 
+          <div className="text-widget-toolbar-row">
+            <button type="button" className="ghost-button" onClick={handleAddTextWidget}>
+              + Thêm widget chữ
+            </button>
+            <div className="text-widget-global-toolbar">
+              <button
+                type="button"
+                disabled={!hasActiveTextEditor}
+                onClick={() => execOnActiveTextWidget('bold')}
+              >
+                <strong>B</strong>
+              </button>
+              <button
+                type="button"
+                disabled={!hasActiveTextEditor}
+                onClick={() => execOnActiveTextWidget('italic')}
+              >
+                <em>I</em>
+              </button>
+              <button
+                type="button"
+                disabled={!hasActiveTextEditor}
+                onClick={() => execOnActiveTextWidget('underline')}
+              >
+                <u>U</u>
+              </button>
+              <div className="text-widget-size-combo">
+                <input
+                  type="number"
+                  className="text-widget-size-input"
+                  title="Cỡ chữ (px) — gõ số tuỳ ý hoặc chọn từ danh sách"
+                  placeholder="Cỡ"
+                  min="6"
+                  max="300"
+                  value={activeFontSize}
+                  disabled={!hasActiveTextEditor}
+                  onChange={(e) => setActiveFontSize(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') e.currentTarget.blur();
+                  }}
+                  onBlur={(e) => {
+                    const val = e.target.value;
+                    if (val && String(val) !== String(activeFontSizeRef.current)) {
+                      applyFontSizeToActiveTextWidget(val);
+                      activeFontSizeRef.current = val;
+                    }
+                  }}
+                />
+                <details className="text-widget-size-menu">
+                  <summary
+                    className="text-widget-size-toggle"
+                    title="Chọn cỡ chữ"
+                    aria-disabled={!hasActiveTextEditor}
+                  >
+                    ▾
+                  </summary>
+                  <ul className="text-widget-size-list">
+                    {FONT_SIZE_PRESETS.map((size) => (
+                      <li key={size}>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.currentTarget.closest('details').removeAttribute('open');
+                            setActiveFontSize(String(size));
+                            activeFontSizeRef.current = String(size);
+                            applyFontSizeToActiveTextWidget(size);
+                          }}
+                        >
+                          {size}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              </div>
+              <input
+                type="color"
+                title="Màu chữ"
+                disabled={!hasActiveTextEditor}
+                onChange={(e) => execOnActiveTextWidget('foreColor', e.target.value)}
+              />
+              <button
+                type="button"
+                disabled={!hasActiveTextEditor}
+                onClick={() => execOnActiveTextWidget('justifyLeft')}
+              >
+                Trái
+              </button>
+              <button
+                type="button"
+                disabled={!hasActiveTextEditor}
+                onClick={() => execOnActiveTextWidget('justifyCenter')}
+              >
+                Giữa
+              </button>
+              <button
+                type="button"
+                disabled={!hasActiveTextEditor}
+                onClick={() => execOnActiveTextWidget('justifyRight')}
+              >
+                Phải
+              </button>
+              <button
+                type="button"
+                disabled={!hasActiveTextEditor}
+                onClick={() => execOnActiveTextWidget('justifyFull')}
+              >
+                Đều
+              </button>
+            </div>
+          </div>
+
           <div className="report-pages-toolbar">
             <button type="button" className="ghost-button" disabled={widgets.length === 0} onClick={handlePresent}>
               Toàn màn hình
@@ -602,7 +912,7 @@ export default function ReportEditor() {
                   pageRef={(el) => {
                     pageRefs.current[pageIndex] = el;
                   }}
-                  draggableCancel=".chart-type-select, .ghost-button, .primary-button, input, textarea, select, button"
+                  draggableCancel=".chart-type-select, .ghost-button, .primary-button, input, textarea, select, button, .text-widget-content"
                   renderWidget={renderWidgetCard}
                 />
               </div>
