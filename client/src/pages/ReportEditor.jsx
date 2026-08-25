@@ -16,6 +16,7 @@ import { applyFilters } from '../charts/filterRows';
 import {
   GRID_ROWS,
   NEW_WIDGET_LAYOUT,
+  NEW_TEXT_WIDGET_LAYOUT,
   assignLegacyPages,
   computeAddPlacement,
   groupByPage,
@@ -303,7 +304,7 @@ export default function ReportEditor() {
         key: nextWidgetKey(),
         widgetType: 'text',
         text: '',
-        layout: { page, x: 0, y, ...NEW_WIDGET_LAYOUT },
+        layout: { page, x: 0, y, ...NEW_TEXT_WIDGET_LAYOUT },
       },
     ]);
   }
