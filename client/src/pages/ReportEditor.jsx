@@ -476,7 +476,7 @@ export default function ReportEditor() {
   function renderWidgetCard(w, { hideControls = false } = {}) {
     const widgetType = w.widgetType ?? 'chart';
     return (
-      <div className="widget-card" key={w.key}>
+      <div className={widgetType === 'text' ? 'widget-card widget-card-text' : 'widget-card'} key={w.key}>
         <div className="query-result-header">
           {widgetType === 'chart' && <h3 className="section-title">{w.runResult.name}</h3>}
           {!hideControls && (
@@ -719,25 +719,22 @@ export default function ReportEditor() {
               >
                 • List
               </button>
-              <select
+              <input
+                type="number"
+                className="text-widget-size-input"
+                title="Cỡ chữ (px)"
+                placeholder="Cỡ (px)"
+                min="6"
+                max="300"
                 disabled={!hasActiveTextEditor}
-                defaultValue=""
-                onChange={(e) => {
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') e.currentTarget.blur();
+                }}
+                onBlur={(e) => {
                   if (e.target.value) applyFontSizeToActiveTextWidget(e.target.value);
                   e.target.value = '';
                 }}
-              >
-                <option value="" disabled>
-                  Cỡ chữ
-                </option>
-                <option value="12">12px</option>
-                <option value="14">14px</option>
-                <option value="16">16px</option>
-                <option value="18">18px</option>
-                <option value="24">24px</option>
-                <option value="32">32px</option>
-                <option value="48">48px</option>
-              </select>
+              />
               <input
                 type="color"
                 title="Màu chữ"

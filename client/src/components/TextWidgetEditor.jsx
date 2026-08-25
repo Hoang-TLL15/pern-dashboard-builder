@@ -1,9 +1,9 @@
 // src/components/TextWidgetEditor.jsx
 // contentEditable thuần — toolbar định dạng nằm ở ReportEditor (dùng chung
 // cho mọi widget chữ trên report qua .text-widget-global-toolbar), không
-// còn toolbar riêng trong từng widget. Mỗi lần focus/đổi vùng chọn, báo lên
-// cha qua onActivate(node, range) để toolbar biết đang tác động vào widget
-// nào. Luôn sanitize trước khi lưu (onBlur) và trước khi hiển thị (kể cả lúc
+// còn toolbar riêng trong từng widget. Mỗi lần vùng chọn đổi, báo lên cha
+// qua onActivate(node, range) để toolbar biết đang tác động vào widget nào.
+// Luôn sanitize trước khi lưu (onBlur) và trước khi hiển thị (kể cả lúc
 // đang sửa), vì đây là bề mặt XSS thật (dangerouslySetInnerHTML).
 //
 // Nội dung div contentEditable set 1 LẦN DUY NHẤT lúc mount qua useEffect
@@ -27,6 +27,24 @@ export default function TextWidgetEditor({ html, editable, onChange, onActivate 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Theo dõi vùng chọn qua selectionchange ở document — KHÔNG dùng
+  // onMouseUp/onKeyUp trên chính div. Nếu người dùng kéo chọn chữ rồi thả
+  // chuột ra NGOÀI ranh giới div (rất dễ xảy ra khi kéo tới sát mép),
+  // onMouseUp không bao giờ fire vì target của mouseup không phải div này
+  // — khiến toolbar dùng chung tác động vào vùng chọn CŨ/rỗng thay vì vùng
+  // vừa chọn. selectionchange fire ở document bất kể chuột thả ở đâu, luôn
+  // đúng với vùng chọn thật.
+  useEffect(() => {
+    if (!editable) return;
+    function onSelectionChange() {
+      const sel = window.getSelection();
+      if (!sel || !editorRef.current || !editorRef.current.contains(sel.anchorNode)) return;
+      onActivate(editorRef.current, sel.rangeCount > 0 ? sel.getRangeAt(0).cloneRange() : null);
+    }
+    document.addEventListener('selectionchange', onSelectionChange);
+    return () => document.removeEventListener('selectionchange', onSelectionChange);
+  }, [editable, onActivate]);
+
   if (!editable) {
     return (
       <div
@@ -36,20 +54,12 @@ export default function TextWidgetEditor({ html, editable, onChange, onActivate 
     );
   }
 
-  function reportActivation() {
-    const sel = window.getSelection();
-    onActivate(editorRef.current, sel && sel.rangeCount > 0 ? sel.getRangeAt(0).cloneRange() : null);
-  }
-
   return (
     <div
       ref={editorRef}
       className="text-widget-content"
       contentEditable
       suppressContentEditableWarning
-      onFocus={reportActivation}
-      onMouseUp={reportActivation}
-      onKeyUp={reportActivation}
       onBlur={(e) => onChange(sanitizeHtml(e.currentTarget.innerHTML))}
     />
   );

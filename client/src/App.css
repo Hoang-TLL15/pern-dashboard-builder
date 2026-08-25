@@ -727,6 +727,11 @@
   overflow: auto;
 }
 
+.widget-card-text {
+  border-color: transparent;
+  padding: 6px 8px;
+}
+
 .widget-card .chart-canvas-wrap,
 .widget-card .query-result-table-wrap,
 .widget-card .metric-card,
@@ -809,8 +814,7 @@
   flex-wrap: wrap;
 }
 
-.text-widget-global-toolbar button,
-.text-widget-global-toolbar select {
+.text-widget-global-toolbar button {
   border: 1px solid var(--color-border);
   border-radius: 6px;
   background: var(--color-surface);
@@ -825,10 +829,19 @@
 }
 
 .text-widget-global-toolbar button:disabled,
-.text-widget-global-toolbar select:disabled,
 .text-widget-global-toolbar input:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.text-widget-size-input {
+  width: 68px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: 13px;
+  padding: 4px 8px;
 }
 
 .text-widget-global-toolbar input[type='color'] {
