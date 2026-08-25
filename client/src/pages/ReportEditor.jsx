@@ -28,6 +28,10 @@ function nextWidgetKey() {
   return `w${widgetKeySeq}`;
 }
 
+// Các mốc cỡ chữ chuẩn của Word, dùng cho dropdown chọn nhanh (ô "Cỡ" vẫn
+// gõ được số tuỳ ý — dropdown chỉ là gợi ý nhanh, không giới hạn giá trị).
+const FONT_SIZE_PRESETS = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 44, 48, 54, 60, 66, 72, 80, 88, 96];
+
 // Đọc cỡ chữ (px) thật của 1 Range để hiển thị lên ô "Cỡ" — giống Word:
 // con trỏ (range rỗng) trả về cỡ tại đúng vị trí đó; có bôi đen thì duyệt
 // mọi text node nằm trong vùng chọn, nếu tất cả CÙNG 1 cỡ mới trả về cỡ đó,
@@ -335,10 +339,6 @@ export default function ReportEditor() {
     // thay vì <b>/<i>/<u>, không khớp allowlist và bị sanitizer strip mất.
     document.execCommand('styleWithCSS', false, command === 'foreColor');
     document.execCommand(command, false, value);
-
-    // Bấm "• List" SAU KHI chữ đã có cỡ riêng: <li> vừa tạo ra không tự
-    // nhận cỡ chữ của nội dung bên trong — đồng bộ lại ngay.
-    if (command === 'insertUnorderedList') syncListItemFontSizes(node);
   }
 
   // execCommand('fontSize') chỉ hỗ trợ 7 mức cố định, không ra đúng số px —
@@ -809,42 +809,55 @@ export default function ReportEditor() {
               >
                 <u>U</u>
               </button>
-              <button
-                type="button"
-                disabled={!hasActiveTextEditor}
-                onClick={() => execOnActiveTextWidget('insertUnorderedList')}
-              >
-                •
-              </button>
-              <input
-                type="number"
-                className="text-widget-size-input"
-                title="Cỡ chữ (px) — gõ số tuỳ ý hoặc chọn từ danh sách"
-                placeholder="Cỡ"
-                list="text-widget-size-list"
-                min="6"
-                max="300"
-                value={activeFontSize}
-                disabled={!hasActiveTextEditor}
-                onChange={(e) => setActiveFontSize(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') e.currentTarget.blur();
-                }}
-                onBlur={(e) => {
-                  const val = e.target.value;
-                  if (val && String(val) !== String(activeFontSizeRef.current)) {
-                    applyFontSizeToActiveTextWidget(val);
-                    activeFontSizeRef.current = val;
-                  }
-                }}
-              />
-              <datalist id="text-widget-size-list">
-                {[8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 44, 48, 54, 60, 66, 72, 80, 88, 96].map(
-                  (size) => (
-                    <option key={size} value={size} />
-                  )
-                )}
-              </datalist>
+              <div className="text-widget-size-combo">
+                <input
+                  type="number"
+                  className="text-widget-size-input"
+                  title="Cỡ chữ (px) — gõ số tuỳ ý hoặc chọn từ danh sách"
+                  placeholder="Cỡ"
+                  min="6"
+                  max="300"
+                  value={activeFontSize}
+                  disabled={!hasActiveTextEditor}
+                  onChange={(e) => setActiveFontSize(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') e.currentTarget.blur();
+                  }}
+                  onBlur={(e) => {
+                    const val = e.target.value;
+                    if (val && String(val) !== String(activeFontSizeRef.current)) {
+                      applyFontSizeToActiveTextWidget(val);
+                      activeFontSizeRef.current = val;
+                    }
+                  }}
+                />
+                <details className="text-widget-size-menu">
+                  <summary
+                    className="text-widget-size-toggle"
+                    title="Chọn cỡ chữ"
+                    aria-disabled={!hasActiveTextEditor}
+                  >
+                    ▾
+                  </summary>
+                  <ul className="text-widget-size-list">
+                    {FONT_SIZE_PRESETS.map((size) => (
+                      <li key={size}>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.currentTarget.closest('details').removeAttribute('open');
+                            setActiveFontSize(String(size));
+                            activeFontSizeRef.current = String(size);
+                            applyFontSizeToActiveTextWidget(size);
+                          }}
+                        >
+                          {size}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              </div>
               <input
                 type="color"
                 title="Màu chữ"

@@ -834,14 +834,85 @@
   cursor: not-allowed;
 }
 
+.text-widget-size-combo {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+}
+
 .text-widget-size-input {
-  width: 68px;
+  width: 52px;
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-right: none;
+  border-radius: 6px 0 0 6px;
   background: var(--color-surface);
   color: var(--color-text);
   font-size: 13px;
   padding: 4px 8px;
+  /* ẩn spinner số mặc định — giống ô cỡ chữ của Word, không có nút tăng
+     giảm, chỉ có gõ tay hoặc mở dropdown chọn nhanh. */
+  -moz-appearance: textfield;
+}
+
+.text-widget-size-input::-webkit-inner-spin-button,
+.text-widget-size-input::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.text-widget-size-menu {
+  position: relative;
+}
+
+.text-widget-size-toggle {
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 0 6px 6px 0;
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.text-widget-size-toggle::-webkit-details-marker {
+  display: none;
+}
+
+.text-widget-size-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 10;
+  max-height: 260px;
+  overflow-y: auto;
+  min-width: 64px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  padding: 4px;
+  margin: 0;
+  list-style: none;
+}
+
+.text-widget-size-list button {
+  display: block;
+  width: 100%;
+  border: none;
+  background: none;
+  color: var(--color-text);
+  font-size: 13px;
+  text-align: left;
+  padding: 6px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.text-widget-size-list button:hover {
+  background: var(--color-border);
 }
 
 .text-widget-global-toolbar input[type='color'] {
