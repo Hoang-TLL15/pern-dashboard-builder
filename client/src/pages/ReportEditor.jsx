@@ -52,11 +52,73 @@ export default function ReportEditor() {
   const [pickerError, setPickerError] = useState('');
   const [exporting, setExporting] = useState(false);
 
+  const [presentPageIndex, setPresentPageIndex] = useState(null); // null = không trình chiếu
+  const [presentDisplayWidth, setPresentDisplayWidth] = useState(1280);
+
   const pageRefs = useRef([]); // DOM node của từng trang, dùng để xuất PDF theo từng trang
+  const presentRef = useRef(null);
+
+  const pages = groupByPage(widgets);
+  const isPresenting = presentPageIndex !== null;
 
   useEffect(() => {
     dbConnectionService.list().then(setDbConnections).catch(() => {});
   }, []);
+
+  // Đồng bộ lại state khi người dùng thoát toàn màn hình bằng phím Esc hoặc
+  // nút "X" của trình duyệt.
+  useEffect(() => {
+    function onFullscreenChange() {
+      if (!document.fullscreenElement) setPresentPageIndex(null);
+    }
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', onFullscreenChange);
+  }, []);
+
+  // Chỉ gọi requestFullscreen khi CHUYỂN từ không trình chiếu -> trình chiếu
+  // (không phụ thuộc presentPageIndex đổi qua lại giữa các trang).
+  useEffect(() => {
+    if (isPresenting && document.fullscreenElement !== presentRef.current) {
+      presentRef.current?.requestFullscreen();
+    }
+  }, [isPresenting]);
+
+  // Khung trình chiếu luôn vừa khít màn hình thật (khác canvas nhỏ cố định
+  // lúc chỉnh sửa) — đo lại mỗi khi cửa sổ đổi kích thước trong lúc trình
+  // chiếu. An toàn ở đây vì lúc trình chiếu grid không tương tác (interactive
+  // =false), không có nguy cơ phá vỡ toán kéo/resize như lúc chỉnh sửa.
+  useEffect(() => {
+    if (!isPresenting) return;
+    function updateSize() {
+      const designAspect = 16 / 9;
+      const screenAspect = window.innerWidth / window.innerHeight;
+      const width =
+        screenAspect > designAspect ? window.innerHeight * designAspect : window.innerWidth;
+      setPresentDisplayWidth(width);
+    }
+    updateSize();
+    window.addEventListener('resize', updateSize);
+    return () => window.removeEventListener('resize', updateSize);
+  }, [isPresenting]);
+
+  // Điều hướng trang bằng phím mũi tên trong lúc trình chiếu.
+  useEffect(() => {
+    if (!isPresenting) return;
+    function onKeyDown(e) {
+      if (e.key === 'ArrowRight') {
+        setPresentPageIndex((i) => Math.min(pages.length - 1, i + 1));
+      } else if (e.key === 'ArrowLeft') {
+        setPresentPageIndex((i) => Math.max(0, i - 1));
+      }
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isPresenting, pages.length]);
+
+  function handlePresent() {
+    if (widgets.length === 0) return;
+    setPresentPageIndex(0);
+  }
 
   useEffect(() => {
     if (!isEditing) return;
@@ -322,11 +384,12 @@ export default function ReportEditor() {
     }
   }
 
-  function renderWidgetCard(w) {
+  function renderWidgetCard(w, { hideControls = false } = {}) {
     return (
       <div className="widget-card" key={w.key}>
         <div className="query-result-header">
           <h3 className="section-title">{w.runResult.name}</h3>
+          {!hideControls && (
           <div className="widget-card-controls">
             <details className="widget-menu">
               <summary className="ghost-button" title="Tuỳ chọn khác">
@@ -388,8 +451,9 @@ export default function ReportEditor() {
               </div>
             </details>
           </div>
+          )}
         </div>
-        {openFilterKeys.has(w.key) && (
+        {!hideControls && openFilterKeys.has(w.key) && (
           <WidgetFilterEditor
             columns={w.runResult.columns}
             rows={w.runResult.rows}
@@ -404,8 +468,6 @@ export default function ReportEditor() {
       </div>
     );
   }
-
-  const pages = groupByPage(widgets);
 
   return (
     <div className="placeholder-page">
@@ -524,21 +586,50 @@ export default function ReportEditor() {
             )}
           </div>
 
+          <div className="report-pages-toolbar">
+            <button type="button" className="ghost-button" disabled={widgets.length === 0} onClick={handlePresent}>
+              Toàn màn hình
+            </button>
+          </div>
+
           <div>
             {pages.map((pageWidgets, pageIndex) => (
-              <ReportPage
-                key={pageIndex}
-                pageIndex={pageIndex}
-                widgets={pageWidgets}
-                onLayoutChange={handleGridLayoutChange}
-                pageRef={(el) => {
-                  pageRefs.current[pageIndex] = el;
-                }}
-                draggableCancel=".chart-type-select, .ghost-button, .primary-button, input, textarea, select, button"
-                renderWidget={renderWidgetCard}
-              />
+              <div className="report-page-list-item" key={pageIndex}>
+                <ReportPage
+                  pageIndex={pageIndex}
+                  widgets={pageWidgets}
+                  onLayoutChange={handleGridLayoutChange}
+                  pageRef={(el) => {
+                    pageRefs.current[pageIndex] = el;
+                  }}
+                  draggableCancel=".chart-type-select, .ghost-button, .primary-button, input, textarea, select, button"
+                  renderWidget={renderWidgetCard}
+                />
+              </div>
             ))}
           </div>
+
+          {isPresenting && (
+            <div className="present-overlay" ref={presentRef}>
+              <div className="present-toolbar">
+                <span className="present-page-indicator">
+                  Trang {presentPageIndex + 1}/{pages.length}
+                </span>
+              </div>
+              <div className="present-stage">
+                <ReportPage
+                  pageIndex={presentPageIndex}
+                  widgets={pages[presentPageIndex]}
+                  onLayoutChange={() => {}}
+                  pageRef={() => {}}
+                  draggableCancel=""
+                  displayWidth={presentDisplayWidth}
+                  interactive={false}
+                  renderWidget={(w) => renderWidgetCard(w, { hideControls: true })}
+                />
+              </div>
+            </div>
+          )}
 
           {saveError && <p className="form-message error">{saveError}</p>}
 

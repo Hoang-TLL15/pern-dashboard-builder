@@ -1,9 +1,9 @@
 // src/reports/pagination.js
 // Logic thuần (không phụ thuộc React) để chia widget của 1 report thành các
 // trang cố định 1920x1080 (16:9). 36 hàng x rowHeight thiết kế 30px = 1080px.
-export const GRID_COLS = 12;
+export const GRID_COLS = 24;
 export const GRID_ROWS = 36;
-export const NEW_WIDGET_LAYOUT = { w: 6, h: 10, minW: 3, minH: 4 };
+export const NEW_WIDGET_LAYOUT = { w: 12, h: 10, minW: 2, minH: 4 };
 
 const LEGACY_WIDGET_LAYOUT = { w: GRID_COLS, h: 10, minW: 3, minH: 4 };
 
