@@ -59,6 +59,13 @@ export default function ReportEditor() {
   const pageRefs = useRef([]); // DOM node của từng trang, dùng để xuất PDF theo từng trang
   const presentRef = useRef(null);
 
+  // Widget chữ đang được chọn/sửa gần nhất — toolbar định dạng dùng chung
+  // (không nằm trong từng widget) tác động vào đây. Dùng ref (không phải
+  // state) cho chính node/range vì không cần re-render khi nó đổi; chỉ có
+  // "đã từng active hay chưa" mới cần state để bật/tắt toolbar.
+  const activeTextEditorRef = useRef({ node: null, range: null });
+  const [hasActiveTextEditor, setHasActiveTextEditor] = useState(false);
+
   const pages = groupByPage(widgets);
   const isPresenting = presentPageIndex !== null;
 
@@ -245,6 +252,46 @@ export default function ReportEditor() {
     setWidgets((prev) => prev.map((w) => (w.key === key ? { ...w, text: html } : w)));
   }
 
+  function handleTextWidgetActivate(node, range) {
+    activeTextEditorRef.current = { node, range };
+    setHasActiveTextEditor(true);
+  }
+
+  // Khôi phục đúng con trỏ/vùng chọn của widget chữ đang active trước khi
+  // gọi execCommand — toolbar giờ nằm ngoài widget nên bấm nút luôn làm
+  // widget mất focus, phải tự set lại selection cho execCommand tác động
+  // đúng chỗ.
+  function execOnActiveTextWidget(command, value) {
+    const { node, range } = activeTextEditorRef.current;
+    if (!node) return;
+    node.focus();
+    if (range) {
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+    // styleWithCSS là toggle chung của cả document — chỉ bật cho foreColor
+    // (để ra <span style="color:...">, khớp sanitizer) — bật chung cho mọi
+    // command sẽ khiến bold/italic/underline ra <span style="font-weight:...">
+    // thay vì <b>/<i>/<u>, không khớp allowlist và bị sanitizer strip mất.
+    document.execCommand('styleWithCSS', false, command === 'foreColor');
+    document.execCommand(command, false, value);
+  }
+
+  // execCommand('fontSize') chỉ hỗ trợ 7 mức cố định, không ra đúng số px —
+  // tự bọc vùng chọn trong 1 <span style="font-size:...px"> bằng Range API
+  // gốc của trình duyệt thay vì execCommand.
+  function applyFontSizeToActiveTextWidget(px) {
+    const { node, range } = activeTextEditorRef.current;
+    if (!node || !range || range.collapsed) return;
+    node.focus();
+    const span = document.createElement('span');
+    span.style.fontSize = `${px}px`;
+    span.appendChild(range.extractContents());
+    range.insertNode(span);
+    window.getSelection().removeAllRanges();
+  }
+
   function toggleFilters(key) {
     setOpenFilterKeys((prev) => {
       const next = new Set(prev);
@@ -322,8 +369,7 @@ export default function ReportEditor() {
           // (dropdown loại chart, nút +/Xoá/↑/↓, panel điều kiện lọc).
           ignoreElements: (el) =>
             el.classList?.contains('widget-card-controls') ||
-            el.classList?.contains('widget-filter-editor') ||
-            el.classList?.contains('text-widget-toolbar'),
+            el.classList?.contains('widget-filter-editor'),
         });
 
         if (i > 0) doc.addPage(undefined, 'landscape');
@@ -516,6 +562,7 @@ export default function ReportEditor() {
             html={w.text}
             editable={!hideControls}
             onChange={(html) => handleWidgetTextChange(w.key, html)}
+            onActivate={handleTextWidgetActivate}
           />
         )}
       </div>
@@ -639,9 +686,94 @@ export default function ReportEditor() {
             )}
           </div>
 
-          <button type="button" className="ghost-button" onClick={handleAddTextWidget}>
-            + Thêm widget chữ
-          </button>
+          <div className="text-widget-toolbar-row">
+            <button type="button" className="ghost-button" onClick={handleAddTextWidget}>
+              + Thêm widget chữ
+            </button>
+            <div className="text-widget-global-toolbar">
+              <button
+                type="button"
+                disabled={!hasActiveTextEditor}
+                onClick={() => execOnActiveTextWidget('bold')}
+              >
+                <strong>B</strong>
+              </button>
+              <button
+                type="button"
+                disabled={!hasActiveTextEditor}
+                onClick={() => execOnActiveTextWidget('italic')}
+              >
+                <em>I</em>
+              </button>
+              <button
+                type="button"
+                disabled={!hasActiveTextEditor}
+                onClick={() => execOnActiveTextWidget('underline')}
+              >
+                <u>U</u>
+              </button>
+              <button
+                type="button"
+                disabled={!hasActiveTextEditor}
+                onClick={() => execOnActiveTextWidget('insertUnorderedList')}
+              >
+                • List
+              </button>
+              <select
+                disabled={!hasActiveTextEditor}
+                defaultValue=""
+                onChange={(e) => {
+                  if (e.target.value) applyFontSizeToActiveTextWidget(e.target.value);
+                  e.target.value = '';
+                }}
+              >
+                <option value="" disabled>
+                  Cỡ chữ
+                </option>
+                <option value="12">12px</option>
+                <option value="14">14px</option>
+                <option value="16">16px</option>
+                <option value="18">18px</option>
+                <option value="24">24px</option>
+                <option value="32">32px</option>
+                <option value="48">48px</option>
+              </select>
+              <input
+                type="color"
+                title="Màu chữ"
+                disabled={!hasActiveTextEditor}
+                onChange={(e) => execOnActiveTextWidget('foreColor', e.target.value)}
+              />
+              <button
+                type="button"
+                disabled={!hasActiveTextEditor}
+                onClick={() => execOnActiveTextWidget('justifyLeft')}
+              >
+                Trái
+              </button>
+              <button
+                type="button"
+                disabled={!hasActiveTextEditor}
+                onClick={() => execOnActiveTextWidget('justifyCenter')}
+              >
+                Giữa
+              </button>
+              <button
+                type="button"
+                disabled={!hasActiveTextEditor}
+                onClick={() => execOnActiveTextWidget('justifyRight')}
+              >
+                Phải
+              </button>
+              <button
+                type="button"
+                disabled={!hasActiveTextEditor}
+                onClick={() => execOnActiveTextWidget('justifyFull')}
+              >
+                Đều
+              </button>
+            </div>
+          </div>
 
           <div className="report-pages-toolbar">
             <button type="button" className="ghost-button" disabled={widgets.length === 0} onClick={handlePresent}>
@@ -659,7 +791,7 @@ export default function ReportEditor() {
                   pageRef={(el) => {
                     pageRefs.current[pageIndex] = el;
                   }}
-                  draggableCancel=".chart-type-select, .ghost-button, .primary-button, input, textarea, select, button"
+                  draggableCancel=".chart-type-select, .ghost-button, .primary-button, input, textarea, select, button, .text-widget-content"
                   renderWidget={renderWidgetCard}
                 />
               </div>
