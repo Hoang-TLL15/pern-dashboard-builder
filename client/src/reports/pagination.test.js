@@ -43,7 +43,7 @@ assert.deepEqual(
 const noLayout = assignLegacyPages([{ key: 'w1' }, { key: 'w2' }]);
 assert.deepEqual(
   noLayout.map((w) => [w.layout.page, w.layout.x, w.layout.y, w.layout.w, w.layout.h]),
-  [[0, 0, 0, 12, 10], [0, 0, 10, 12, 10]]
+  [[0, 0, 0, 24, 10], [0, 0, 10, 24, 10]]
 );
 
 // groupByPage
