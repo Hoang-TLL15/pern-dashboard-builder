@@ -28,6 +28,34 @@ function nextWidgetKey() {
   return `w${widgetKeySeq}`;
 }
 
+// Đọc cỡ chữ (px) thật của 1 Range để hiển thị lên ô "Cỡ" — giống Word:
+// con trỏ (range rỗng) trả về cỡ tại đúng vị trí đó; có bôi đen thì duyệt
+// mọi text node nằm trong vùng chọn, nếu tất cả CÙNG 1 cỡ mới trả về cỡ đó,
+// khác nhau thì trả về '' (rỗng). Dùng getComputedStyle nên tự tính đúng cả
+// chữ chưa từng chỉnh cỡ (kế thừa từ CSS mặc định), không chỉ chữ có
+// style="font-size" tường minh.
+function getRangeFontSize(range) {
+  if (!range) return '';
+  if (range.collapsed) {
+    const container = range.startContainer;
+    const el = container.nodeType === Node.TEXT_NODE ? container.parentElement : container;
+    if (!el) return '';
+    return parseInt(getComputedStyle(el).fontSize, 10) || '';
+  }
+  const sizes = new Set();
+  const root = range.commonAncestorContainer;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let node = root.nodeType === Node.TEXT_NODE ? root : walker.nextNode();
+  while (node) {
+    if (node.textContent.trim() !== '' && range.intersectsNode(node)) {
+      sizes.add(getComputedStyle(node.parentElement).fontSize);
+    }
+    node = walker.nextNode();
+  }
+  if (sizes.size !== 1) return '';
+  return parseInt([...sizes][0], 10) || '';
+}
+
 export default function ReportEditor() {
   const { id } = useParams();
   const isEditing = Boolean(id);
@@ -65,6 +93,12 @@ export default function ReportEditor() {
   // "đã từng active hay chưa" mới cần state để bật/tắt toolbar.
   const activeTextEditorRef = useRef({ node: null, range: null });
   const [hasActiveTextEditor, setHasActiveTextEditor] = useState(false);
+  // Cỡ chữ hiển thị trong ô "Cỡ" — phản ánh đúng vùng chọn hiện tại, giống
+  // Word: rỗng nếu vùng chọn gồm nhiều cỡ khác nhau. activeFontSizeRef giữ
+  // giá trị đã đồng bộ gần nhất để so sánh lúc blur, tránh áp lại 1 giá trị
+  // người dùng không hề gõ (chỉ click vào ô rồi click ra).
+  const [activeFontSize, setActiveFontSize] = useState('');
+  const activeFontSizeRef = useRef('');
 
   const pages = groupByPage(widgets);
   const isPresenting = presentPageIndex !== null;
@@ -255,6 +289,9 @@ export default function ReportEditor() {
   function handleTextWidgetActivate(node, range) {
     activeTextEditorRef.current = { node, range };
     setHasActiveTextEditor(true);
+    const size = getRangeFontSize(range);
+    activeFontSizeRef.current = size;
+    setActiveFontSize(size);
   }
 
   // Khôi phục đúng con trỏ/vùng chọn của widget chữ đang active trước khi
@@ -305,7 +342,20 @@ export default function ReportEditor() {
       sel.removeAllRanges();
       sel.addRange(caretRange);
     } else {
-      span.appendChild(range.extractContents());
+      const extracted = range.extractContents();
+      // Nếu vùng chọn đang có nhiều cỡ chữ khác nhau (do từng chỉnh riêng
+      // lẻ trước đó), các span/li lồng bên trong VẪN giữ font-size riêng
+      // của chúng — font-size của span mới bọc ngoài không đè được lên vì
+      // 1 phần tử luôn ưu tiên font-size trên chính nó hơn là kế thừa từ
+      // cha. Phải xoá font-size khỏi mọi phần tử lồng bên trong trước, để
+      // toàn bộ vùng chọn thật sự về cùng 1 cỡ mới duy nhất.
+      const walker = document.createTreeWalker(extracted, NodeFilter.SHOW_ELEMENT);
+      let el = walker.nextNode();
+      while (el) {
+        el.style.removeProperty('font-size');
+        el = walker.nextNode();
+      }
+      span.appendChild(extracted);
       range.insertNode(span);
       window.getSelection().removeAllRanges();
     }
@@ -742,23 +792,28 @@ export default function ReportEditor() {
                 disabled={!hasActiveTextEditor}
                 onClick={() => execOnActiveTextWidget('insertUnorderedList')}
               >
-                • List
+                •
               </button>
               <input
                 type="number"
                 className="text-widget-size-input"
                 title="Cỡ chữ (px) — gõ số tuỳ ý hoặc chọn từ danh sách"
-                placeholder="Cỡ (px)"
+                placeholder="Cỡ"
                 list="text-widget-size-list"
                 min="6"
                 max="300"
+                value={activeFontSize}
                 disabled={!hasActiveTextEditor}
+                onChange={(e) => setActiveFontSize(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') e.currentTarget.blur();
                 }}
                 onBlur={(e) => {
-                  if (e.target.value) applyFontSizeToActiveTextWidget(e.target.value);
-                  e.target.value = '';
+                  const val = e.target.value;
+                  if (val && String(val) !== String(activeFontSizeRef.current)) {
+                    applyFontSizeToActiveTextWidget(val);
+                    activeFontSizeRef.current = val;
+                  }
                 }}
               />
               <datalist id="text-widget-size-list">
