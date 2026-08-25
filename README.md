@@ -11,12 +11,42 @@
 
 ## Kiến trúc
 
-- **Meta DB** (`dashboard_builder_meta`) — lưu config của app: user, kết nối data source, query config, report, report widget. Truy cập qua Prisma (`server/prisma/schema.prisma`).
-- **Data Source DB** — CSDL bên ngoài mà app chạy hộ SQL đã duyệt sẵn (`query_configs.query`), qua driver layer ở `server/src/db/drivers/` (`postgres`, `mssql`, `mysql`). Backend không biết trước schema hay ý nghĩa dữ liệu của các DB này.
-- **Backend**: `routes/ → controllers/ → services/ → repositories/ → Prisma / db drivers`.
-- **Frontend**: `pages/ → context/ → services/ → api/`.
+### Hai database tách biệt
 
-Chi tiết đầy đủ về layering và driver interface xem [CLAUDE.md](CLAUDE.md). Thiết kế hệ thống gốc (connection pooling, type mapping OID→type chuẩn, mermaid diagram) xem [docs/thiet-ke-he-thong-dashboard-builder.md](docs/thiet-ke-he-thong-dashboard-builder.md).
+- **Meta DB** (`dashboard_builder_meta`) — lưu config của app: user, kết nối data source, query config, report, report widget. Toàn bộ truy cập đi qua Prisma client singleton (`server/prisma/schema.prisma`) — không có `pg` pool riêng nào cho DB này.
+- **Data Source DB** — CSDL bên ngoài mà app chạy hộ SQL đã duyệt sẵn (`query_configs.query`). Backend không biết trước schema hay ý nghĩa dữ liệu của các DB này, chỉ chạy hộ SQL đã duyệt và trả lại kết quả kèm kiểu dữ liệu từng cột.
+
+### Driver layer đa loại DB (`server/src/db/`)
+
+`db_connections.db_type` (`postgres` | `mssql` | `mysql`) chọn driver chạy query. Mỗi driver trong `db/drivers/` implement cùng 1 interface: `createPool(connection)`, `runQuery(pool, sql)` → `{ columns, rows }`, `isTimeoutError(err)`, `resolveColumnType(typeInfo)` → 1 trong các kiểu chuẩn dùng chung (`number/date/string/boolean/json`). `db/drivers/index.js` là registry theo `db_type`; `db/dataSourcePool.js` cache 1 pool cho mỗi `db_connection_id` (evict theo idle time — sliding TTL 10 phút, quét mỗi 60s) và giao việc tạo pool cho đúng driver mà không cần biết chi tiết driver đó. Thêm 1 loại DB mới chỉ cần thêm 1 file driver và đăng ký, không phải sửa nơi khác.
+
+### Backend layering (`server/src/`)
+
+Phân lớp 1 chiều, quy ước bắt buộc — không được bỏ qua lớp trung gian:
+
+```
+routes/ → controllers/ → services/ → repositories/ → Prisma (Meta DB) hoặc db/drivers (Data Source DB)
+```
+
+- **routes** — chỉ khai báo endpoint, chuyển tiếp cho controller. Mọi route trừ `/register`, `/login` đều yêu cầu `authMiddleware`.
+- **controllers** — đọc `req`, gọi đúng 1 method của service, trả `res`/`next`. Không có business logic, không đụng DB.
+- **services** — chứa nghiệp vụ (validate, hash password, phát hành token, kiểm tra quyền sở hữu). Không biết `req`/`res`.
+- **repositories** — chỉ truy cập dữ liệu, không có nghiệp vụ. Repository của Meta DB dùng Prisma; chống IDOR (truy cập chéo dữ liệu người khác) bằng cách luôn lọc/ghi kèm `userId` cùng `id` khi đụng tới report/report widget.
+- **Lỗi**: service throw `AppError(message, statusCode)`; 1 middleware `errorHandler` duy nhất (mount cuối cùng trong `app.js`) chuyển thành JSON response, log ra console nếu là lỗi không lường trước.
+- Biến môi trường được đọc tập trung ở `server/src/config/env.js` (`PORT`, `JWT_SECRET`, `DATABASE_URL`) — nơi khác không tự đọc `process.env`.
+
+### Frontend layering (`client/src/`)
+
+Cùng nguyên tắc phân lớp, mỗi thư mục 1 trách nhiệm:
+
+```
+pages/ → context/ (React state) → services/ (điều phối + localStorage) → api/ (chỉ gọi HTTP)
+```
+
+- **api/** — gọi HTTP thuần qua `apiClient` (axios, tự gắn `Bearer` token từ `localStorage`), trả `response.data` thô, không đụng localStorage, không có nghiệp vụ.
+- **services/** — điều phối API call, với auth thì kiêm luôn lưu phiên đăng nhập (`localStorage`).
+- **context/** — nơi duy nhất giữ React state cho auth (`useAuth()` cung cấp `user`, `login`, `register`, `logout`).
+- **pages/** — component theo route; việc điều hướng/bảo vệ route nằm ở `App.jsx` (`ProtectedRoute` chuyển về `/login` nếu chưa đăng nhập).
 
 ## Logic hoạt động
 
