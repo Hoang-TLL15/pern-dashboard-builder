@@ -48,7 +48,7 @@ export default function TextWidgetEditor({ html, editable, onChange }) {
         className="text-widget-content"
         contentEditable
         suppressContentEditableWarning
-        dangerouslySetInnerHTML={{ __html: html }}
+        dangerouslySetInnerHTML={{ __html: sanitizeHtml(html) }}
         onBlur={(e) => onChange(sanitizeHtml(e.currentTarget.innerHTML))}
       />
     </div>
