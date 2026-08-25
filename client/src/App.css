@@ -729,7 +729,21 @@
 
 .widget-card-text {
   border-color: transparent;
-  padding: 6px 8px;
+  padding: 4px 8px;
+}
+
+/* Header (chứa nút "⋯") chiếm hẳn margin-bottom + padding mặc định của
+   .ghost-button — với box thấp (2 hàng) thì phần chrome này còn choán chỗ
+   hơn cả text bên dưới. Thu nhỏ lại tối đa riêng cho widget chữ. */
+.widget-card-text .query-result-header {
+  margin-bottom: 2px;
+  min-height: 0;
+}
+
+.widget-card-text .widget-card-controls .ghost-button {
+  padding: 1px 8px;
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .widget-card .chart-canvas-wrap,
