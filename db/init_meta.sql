@@ -38,6 +38,7 @@ CREATE TABLE reports (
     user_id INTEGER NOT NULL REFERENCES users(id),
     name VARCHAR(255) NOT NULL,
     description TEXT,
+    filter_values JSONB NOT NULL DEFAULT '{}', -- giá trị global filter áp dụng lần gần nhất, không phải định nghĩa (paramName tự dò từ SQL, xem sqlParams.js)
     created_at TIMESTAMP NOT NULL DEFAULT now(),
     updated_at TIMESTAMP NOT NULL DEFAULT now()
 );
@@ -139,6 +140,81 @@ INSERT INTO query_configs (name, description, db_connection_id, query, suggested
     'Table: liệt kê đơn hàng kèm khách hàng, nhân viên, ngày đặt, trạng thái',
     1,
     'SELECT o.order_id, c.first_name || '' '' || c.last_name AS customer_name, e.full_name AS employee_name, o.order_date, o.status FROM orders o JOIN customers c ON c.customer_id = o.customer_id JOIN employees e ON e.employee_id = o.employee_id ORDER BY o.order_date',
+    'table'
+);
+
+-- query_configs có tham số :year (dùng cho global filter — xem sqlParams.js) —
+-- cùng dữ liệu shop DB, mỗi query 1 loại chart khác nhau. Dữ liệu seed trải dài
+-- 2024-01 -> 2025-03 nên :year hợp lệ là 2024 hoặc 2025.
+INSERT INTO query_configs (name, description, db_connection_id, query, suggested_chart_type) VALUES
+(
+    'Doanh thu theo sản phẩm (theo năm)',
+    'Bar có tham số :year — 1 cột nhãn (product_name) + 1 cột số (revenue)',
+    1,
+    'SELECT p.product_name, SUM(oi.quantity * oi.unit_price) AS revenue FROM orders o JOIN order_items oi ON oi.order_id = o.order_id JOIN products p ON p.product_id = oi.product_id WHERE EXTRACT(YEAR FROM o.order_date) = :year GROUP BY p.product_name ORDER BY revenue DESC',
+    'bar'
+),
+(
+    'Doanh thu theo danh mục và tháng (theo năm)',
+    'Stacked bar có tham số :year — cột nhãn (month) + cột nhóm (category) + cột số (revenue)',
+    1,
+    'SELECT to_char(o.order_date, ''YYYY-MM'') AS month, p.category, SUM(oi.quantity * oi.unit_price) AS revenue FROM orders o JOIN order_items oi ON oi.order_id = o.order_id JOIN products p ON p.product_id = oi.product_id WHERE EXTRACT(YEAR FROM o.order_date) = :year GROUP BY month, p.category ORDER BY month',
+    'stacked_bar'
+),
+(
+    'Doanh thu theo tháng (theo năm)',
+    'Line có tham số :year — 1 cột nhãn (month) + 1 cột số (revenue)',
+    1,
+    'SELECT to_char(o.order_date, ''YYYY-MM'') AS month, SUM(oi.quantity * oi.unit_price) AS revenue FROM orders o JOIN order_items oi ON oi.order_id = o.order_id WHERE EXTRACT(YEAR FROM o.order_date) = :year GROUP BY month ORDER BY month',
+    'line'
+),
+(
+    'Tỷ trọng doanh thu theo danh mục (theo năm)',
+    'Pie có tham số :year — 1 cột nhãn (category) + 1 cột số (revenue)',
+    1,
+    'SELECT p.category, SUM(oi.quantity * oi.unit_price) AS revenue FROM orders o JOIN order_items oi ON oi.order_id = o.order_id JOIN products p ON p.product_id = oi.product_id WHERE EXTRACT(YEAR FROM o.order_date) = :year GROUP BY p.category',
+    'pie'
+),
+(
+    'Số đơn hàng theo phòng ban (theo năm)',
+    'Doughnut có tham số :year — 1 cột nhãn (department) + 1 cột số (order_count)',
+    1,
+    'SELECT e.department, COUNT(*) AS order_count FROM orders o JOIN employees e ON e.employee_id = o.employee_id WHERE EXTRACT(YEAR FROM o.order_date) = :year GROUP BY e.department',
+    'doughnut'
+),
+(
+    'Hiệu suất nhân viên (theo năm)',
+    'Radar có tham số :year — 1 cột nhãn (full_name) + nhiều cột số (order_count, revenue) làm các trục',
+    1,
+    'SELECT e.full_name, COUNT(DISTINCT o.order_id) AS order_count, SUM(oi.quantity * oi.unit_price) AS revenue FROM employees e JOIN orders o ON o.employee_id = e.employee_id JOIN order_items oi ON oi.order_id = o.order_id WHERE EXTRACT(YEAR FROM o.order_date) = :year GROUP BY e.full_name',
+    'radar'
+),
+(
+    'Đơn giá và số lượng bán theo sản phẩm (theo năm)',
+    'Scatter có tham số :year — 2 cột số (unit_price = x, total_quantity = y) + 1 cột nhóm (category)',
+    1,
+    'SELECT p.category, p.unit_price, SUM(oi.quantity) AS total_quantity FROM products p JOIN order_items oi ON oi.product_id = p.product_id JOIN orders o ON o.order_id = oi.order_id WHERE EXTRACT(YEAR FROM o.order_date) = :year GROUP BY p.category, p.unit_price, p.product_id',
+    'scatter'
+),
+(
+    'Đơn giá, số lượng và số đơn theo sản phẩm (theo năm)',
+    'Bubble có tham số :year — 3 cột số (unit_price = x, total_quantity = y, order_count = r) + 1 cột nhóm (category)',
+    1,
+    'SELECT p.category, p.unit_price, SUM(oi.quantity) AS total_quantity, COUNT(DISTINCT o.order_id) AS order_count FROM products p JOIN order_items oi ON oi.product_id = p.product_id JOIN orders o ON o.order_id = oi.order_id WHERE EXTRACT(YEAR FROM o.order_date) = :year GROUP BY p.category, p.unit_price, p.product_id',
+    'bubble'
+),
+(
+    'Tổng doanh thu theo năm',
+    'Metric có tham số :year — 1 cột số duy nhất (total_revenue), dùng làm KPI',
+    1,
+    'SELECT SUM(oi.quantity * oi.unit_price) AS total_revenue FROM orders o JOIN order_items oi ON oi.order_id = o.order_id WHERE EXTRACT(YEAR FROM o.order_date) = :year',
+    'metric'
+),
+(
+    'Danh sách đơn hàng theo năm',
+    'Table có tham số :year — liệt kê đơn hàng kèm khách hàng, nhân viên, ngày đặt, trạng thái',
+    1,
+    'SELECT o.order_id, c.first_name || '' '' || c.last_name AS customer_name, e.full_name AS employee_name, o.order_date, o.status FROM orders o JOIN customers c ON c.customer_id = o.customer_id JOIN employees e ON e.employee_id = o.employee_id WHERE EXTRACT(YEAR FROM o.order_date) = :year ORDER BY o.order_date',
     'table'
 );
 

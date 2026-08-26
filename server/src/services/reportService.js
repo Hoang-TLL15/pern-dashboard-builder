@@ -104,10 +104,31 @@ async function remove(id, userId) {
   }
 }
 
+// Giá trị filter đang chọn (paramName tự dò từ SQL phía client, không phải
+// định nghĩa) — lưu để mở lại report không phải nhập lại. Không validate
+// paramName/type vì không còn khai báo nào để đối chiếu; chỉ chặn payload
+// không phải object phẳng (ObjectValue) để tránh lưu rác/mảng vào JSONB.
+function validateFilterValues(filterValues) {
+  if (typeof filterValues !== 'object' || filterValues === null || Array.isArray(filterValues)) {
+    throw new AppError('filterValues phải là 1 object', 400);
+  }
+  return filterValues;
+}
+
+async function updateFilterValues(id, userId, filterValues) {
+  const numericId = toNumericId(id);
+  const data = validateFilterValues(filterValues);
+  const updated = await reportRepository.updateFilterValues(numericId, userId, data);
+  if (!updated) {
+    throw new AppError('Không tìm thấy report', 404);
+  }
+}
+
 module.exports = {
   list,
   getById,
   create,
   update,
+  updateFilterValues,
   remove,
 };

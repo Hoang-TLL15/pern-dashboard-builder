@@ -47,8 +47,14 @@ function createPool(connection) {
   }).connect();
 }
 
-async function runQuery(pool, sqlText) {
-  const result = await pool.request().query(sqlText);
+async function runQuery(pool, sqlText, params) {
+  const request = pool.request();
+  if (params) {
+    for (const [name, value] of Object.entries(params)) {
+      request.input(name, value);
+    }
+  }
+  const result = await request.query(sqlText);
   const columns = Object.values(result.recordset.columns).map((col) => ({
     name: col.name,
     typeInfo: col.type && col.type.name,

@@ -40,8 +40,8 @@ function createPool(connection) {
   });
 }
 
-async function runQuery(pool, sql) {
-  const result = await pool.query(sql);
+async function runQuery(pool, sql, values) {
+  const result = await pool.query(sql, values);
   return {
     columns: result.fields.map((field) => ({
       name: field.name,

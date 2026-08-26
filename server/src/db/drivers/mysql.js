@@ -41,10 +41,10 @@ function createPool(connection) {
   });
 }
 
-async function runQuery(pool, sql) {
+async function runQuery(pool, sql, values) {
   // connectTimeout ở createPool chỉ tính lúc bắt tay kết nối — phải truyền
   // `timeout` riêng ở đây thì mysql2 mới huỷ câu query đang chạy quá lâu.
-  const [rows, fields] = await pool.query({ sql, timeout: QUERY_TIMEOUT_MS });
+  const [rows, fields] = await pool.query({ sql, timeout: QUERY_TIMEOUT_MS, values });
   return {
     columns: fields.map((field) => ({
       name: field.name,

@@ -14,7 +14,7 @@ async function listByDbConnectionId(req, res, next) {
 
 async function run(req, res, next) {
   try {
-    const result = await queryConfigService.run(req.params.id);
+    const result = await queryConfigService.run(req.params.id, req.query);
     return res.json(result);
   } catch (err) {
     return next(err);
@@ -23,7 +23,7 @@ async function run(req, res, next) {
 
 async function runMany(req, res, next) {
   try {
-    const results = await queryConfigService.runMany(req.body.ids || []);
+    const results = await queryConfigService.runMany(req.body.ids || [], req.body.filters || {});
     return res.json({ results });
   } catch (err) {
     return next(err);

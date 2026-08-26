@@ -26,4 +26,15 @@ async function deleteRequest(id) {
   await apiClient.delete(`/reports/${id}`);
 }
 
-export default { listRequest, getByIdRequest, createRequest, updateRequest, deleteRequest };
+async function updateFilterValuesRequest(id, filterValues) {
+  await apiClient.patch(`/reports/${id}/filter-values`, { filterValues });
+}
+
+export default {
+  listRequest,
+  getByIdRequest,
+  createRequest,
+  updateRequest,
+  updateFilterValuesRequest,
+  deleteRequest,
+};

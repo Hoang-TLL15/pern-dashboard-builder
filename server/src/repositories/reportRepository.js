@@ -89,6 +89,14 @@ async function deleteForUser(id, userId) {
   return result.count > 0;
 }
 
+// updateMany (không phải update) cùng lý do trên: ownership check nằm ngay
+// trong where, không phải query riêng rồi mới update. Không đụng updatedAt/
+// widgets — đây là lưu giá trị filter đang chọn (không phải thao tác "Lưu report").
+async function updateFilterValues(id, userId, filterValues) {
+  const result = await prisma.report.updateMany({ where: { id, userId }, data: { filterValues } });
+  return result.count > 0;
+}
+
 // Dùng bởi queryConfigService.remove() để chặn xoá 1 query_config đang được
 // report_widgets tham chiếu (FK query_config_id không có ON DELETE CASCADE).
 async function countByQueryConfigId(queryConfigId) {
@@ -100,6 +108,7 @@ module.exports = {
   findByIdForUser,
   createForUser,
   updateForUser,
+  updateFilterValues,
   deleteForUser,
   countByQueryConfigId,
 };

@@ -7,13 +7,13 @@ async function listByDbConnectionIdRequest(dbConnectionId) {
   return res.data; // { queryConfigs }
 }
 
-async function runRequest(id) {
-  const res = await apiClient.get(`/query-configs/${id}/run`);
+async function runRequest(id, filters) {
+  const res = await apiClient.get(`/query-configs/${id}/run`, { params: filters });
   return res.data; // { id, name, suggestedChartType, columns[], rows[] }
 }
 
-async function runManyRequest(ids) {
-  const res = await apiClient.post('/query-configs/run-batch', { ids });
+async function runManyRequest(ids, filters) {
+  const res = await apiClient.post('/query-configs/run-batch', { ids, filters });
   return res.data; // { results: [...] }
 }
 

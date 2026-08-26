@@ -48,10 +48,20 @@ async function remove(req, res, next) {
   }
 }
 
+async function updateFilterValues(req, res, next) {
+  try {
+    await reportService.updateFilterValues(req.params.id, req.user.id, req.body.filterValues);
+    return res.status(204).send();
+  } catch (err) {
+    return next(err);
+  }
+}
+
 module.exports = {
   list,
   getById,
   create,
   update,
+  updateFilterValues,
   remove,
 };

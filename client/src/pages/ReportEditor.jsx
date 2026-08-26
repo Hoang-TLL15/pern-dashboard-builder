@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
@@ -10,10 +10,12 @@ import queryConfigService from '../services/queryConfigService';
 import ChartRenderer from '../components/ChartRenderer';
 import Spinner from '../components/Spinner';
 import WidgetFilterEditor from '../components/WidgetFilterEditor';
+import ReportFilterBar from '../components/ReportFilterBar';
 import ReportPage from '../components/ReportPage';
 import TextWidgetEditor from '../components/TextWidgetEditor';
 import { getApplicableChartTypes, pickChartType } from '../charts/chartAdapter';
 import { applyFilters } from '../charts/filterRows';
+import { detectParamNames } from '../utils/sqlParams';
 import {
   DESIGN_WIDTH,
   GRID_POSITION_PARAMS,
@@ -87,6 +89,17 @@ function syncListItemFontSizes(root) {
   });
 }
 
+function detectParamNamesInWidgets(widgets) {
+  const names = [];
+  for (const w of widgets) {
+    for (const name of detectParamNames(w.runResult?.query)) {
+      if (!names.includes(name)) names.push(name);
+    }
+  }
+  return names;
+}
+
+
 export default function ReportEditor() {
   const { id } = useParams();
   const isEditing = Boolean(id);
@@ -101,12 +114,21 @@ export default function ReportEditor() {
   const [saving, setSaving] = useState(false);
   const [openFilterKeys, setOpenFilterKeys] = useState(() => new Set());
   const [saveError, setSaveError] = useState('');
+  const [filterValues, setFilterValues] = useState({}); // giá trị đang chọn (không lưu DB)
+  const [filterApplyError, setFilterApplyError] = useState('');
+  // Định nghĩa global filter luôn tự suy ra từ :paramName có trong SQL của các widget
+  // đang có trong report — không lưu/khai báo thủ công, không lưu vào DB.
+  const filterDefs = useMemo(
+    () => detectParamNamesInWidgets(widgets).map((paramName) => ({ paramName, label: paramName, type: 'text', defaultValue: '' })),
+    [widgets]
+  );
 
   const [dbConnections, setDbConnections] = useState([]);
   const [pickerDbConnectionId, setPickerDbConnectionId] = useState('');
   const [pickerQueryConfigs, setPickerQueryConfigs] = useState([]);
   const [pickerQueryConfigId, setPickerQueryConfigId] = useState('');
   const [pickerPreview, setPickerPreview] = useState(null);
+  const [pickerParamValues, setPickerParamValues] = useState({}); // giá trị :paramName gõ riêng lúc xem trước trước khi thêm vào report
   const [pickerChartType, setPickerChartType] = useState('bar');
   const [pickerLoading, setPickerLoading] = useState(false);
   const [pickerError, setPickerError] = useState('');
@@ -207,17 +229,22 @@ export default function ReportEditor() {
       setLoadError('');
       try {
         const report = await reportService.getById(id);
+        const storedValues = report.filterValues || {};
         const chartIndices = report.widgets
           .map((w, i) => ((w.widgetType ?? 'chart') === 'chart' ? i : -1))
           .filter((i) => i !== -1);
         const chartResults =
           chartIndices.length > 0
-            ? await queryConfigService.runMany(chartIndices.map((i) => report.widgets[i].queryConfigId))
+            ? await queryConfigService.runMany(
+                chartIndices.map((i) => report.widgets[i].queryConfigId),
+                storedValues
+              )
             : [];
         const resultByIndex = new Map(chartIndices.map((origIdx, j) => [origIdx, chartResults[j]]));
         if (cancelled) return;
         setName(report.name);
         setDescription(report.description || '');
+        setFilterValues(storedValues);
         const legacy = isLegacyReport(report);
         const loaded = report.widgets.map((w, i) => {
           const widgetType = w.widgetType ?? 'chart';
@@ -260,6 +287,7 @@ export default function ReportEditor() {
     setPickerDbConnectionId(dbConnectionId);
     setPickerQueryConfigId('');
     setPickerPreview(null);
+    setPickerParamValues({});
     setPickerError('');
     setPickerQueryConfigs([]);
     if (!dbConnectionId) return;
@@ -275,7 +303,10 @@ export default function ReportEditor() {
     setPickerError('');
     setPickerPreview(null);
     try {
-      const result = await queryConfigService.run(pickerQueryConfigId);
+      // Xem trước bằng đúng giá trị global filter report đang áp dụng (nếu :paramName
+      // trùng tên) để không cho ra kết quả rỗng do thiếu tham số; pickerParamValues đè
+      // lên khi người dùng tự gõ giá trị khác ngay trong lúc xem trước.
+      const result = await queryConfigService.run(pickerQueryConfigId, { ...filterValues, ...pickerParamValues });
       setPickerPreview(result);
       setPickerChartType(pickChartType(result, result.suggestedChartType));
     } catch (err) {
@@ -299,10 +330,20 @@ export default function ReportEditor() {
         layout: { page, x: 0, y, ...NEW_WIDGET_LAYOUT },
       },
     ]);
+    // Đồng bộ giá trị đã dùng lúc xem trước vào global filter của report, để không
+    // phải bấm "Áp dụng" thêm 1 lần nữa cho đúng dữ liệu vừa xem — chỉ gọi khi thực
+    // sự có gì khác với filterValues hiện tại (tránh gọi API thừa cho query không
+    // tham số hoặc giá trị xem trước trùng luôn giá trị report đang có).
+    const detected = detectParamNames(pickerPreview.query);
+    const relevant = Object.fromEntries(detected.map((p) => [p, pickerParamValues[p] ?? filterValues[p] ?? '']));
+    if (detected.some((p) => relevant[p] !== (filterValues[p] ?? ''))) {
+      handleApplyFilters({ ...filterValues, ...relevant });
+    }
     setPickerDbConnectionId('');
     setPickerQueryConfigs([]);
     setPickerQueryConfigId('');
     setPickerPreview(null);
+    setPickerParamValues({});
   }
 
   function handleAddTextWidget() {
@@ -622,6 +663,26 @@ export default function ReportEditor() {
     }
   }
 
+  async function handleApplyFilters(newValues) {
+    setFilterValues(newValues);
+    if (isEditing) reportService.updateFilterValues(id, newValues).catch(() => {});
+    const chartWidgets = widgets.filter((w) => (w.widgetType ?? 'chart') === 'chart');
+    if (chartWidgets.length === 0) return;
+    setFilterApplyError('');
+    try {
+      const results = await queryConfigService.runMany(
+        chartWidgets.map((w) => w.queryConfigId),
+        newValues
+      );
+      const resultByKey = new Map(chartWidgets.map((w, i) => [w.key, results[i]]));
+      setWidgets((prev) =>
+        prev.map((w) => (resultByKey.has(w.key) ? { ...w, runResult: resultByKey.get(w.key) } : w))
+      );
+    } catch (err) {
+      setFilterApplyError(err.response?.data?.error || 'Không áp dụng được filter');
+    }
+  }
+
   function renderWidgetCard(w, { hideControls = false } = {}) {
     const widgetType = w.widgetType ?? 'chart';
     return (
@@ -787,7 +848,11 @@ export default function ReportEditor() {
                 className="chart-type-select"
                 value={pickerQueryConfigId}
                 disabled={!pickerDbConnectionId}
-                onChange={(e) => setPickerQueryConfigId(e.target.value)}
+                onChange={(e) => {
+                  setPickerQueryConfigId(e.target.value);
+                  setPickerPreview(null);
+                  setPickerParamValues({});
+                }}
               >
                 <option value="">Chọn query…</option>
                 {pickerQueryConfigs.map((qc) => (
@@ -827,6 +892,24 @@ export default function ReportEditor() {
                 <pre className="query-sql-block">
                   <code>{pickerPreview.query}</code>
                 </pre>
+                {detectParamNames(pickerPreview.query).length > 0 && (
+                  <div className="widget-picker-params">
+                    {detectParamNames(pickerPreview.query).map((p) => (
+                      <div className="widget-picker-params-item" key={p}>
+                        <label htmlFor={`picker-param-${p}`}>{p}</label>
+                        <input
+                          id={`picker-param-${p}`}
+                          type="text"
+                          value={pickerParamValues[p] ?? filterValues[p] ?? ''}
+                          onChange={(e) => setPickerParamValues((prev) => ({ ...prev, [p]: e.target.value }))}
+                        />
+                      </div>
+                    ))}
+                    <button type="button" className="ghost-button" onClick={handlePickerPreview}>
+                      Chạy lại
+                    </button>
+                  </div>
+                )}
                 <ChartRenderer runResult={pickerPreview} chartType={pickerChartType} />
                 <button className="primary-button" onClick={handleAddWidget}>
                   Thêm vào report
@@ -947,6 +1030,11 @@ export default function ReportEditor() {
             </div>
           </div>
 
+          {!isPresenting && (
+            <ReportFilterBar filterDefs={filterDefs} values={filterValues} onApply={handleApplyFilters} />
+          )}
+          {filterApplyError && <p className="form-message error">{filterApplyError}</p>}
+
           <div className="report-pages-toolbar">
             <button type="button" className="ghost-button" disabled={widgets.length === 0} onClick={handlePresent}>
               Toàn màn hình
@@ -979,6 +1067,7 @@ export default function ReportEditor() {
                 <span className="present-page-indicator">
                   Trang {presentPageIndex + 1}/{pages.length}
                 </span>
+                <ReportFilterBar filterDefs={filterDefs} values={filterValues} onApply={handleApplyFilters} />
               </div>
               <div className="present-stage">
                 <ReportPage
