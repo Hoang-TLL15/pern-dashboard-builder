@@ -38,6 +38,7 @@ CREATE TABLE reports (
     user_id INTEGER NOT NULL REFERENCES users(id),
     name VARCHAR(255) NOT NULL,
     description TEXT,
+    filters JSONB NOT NULL DEFAULT '[]',
     created_at TIMESTAMP NOT NULL DEFAULT now(),
     updated_at TIMESTAMP NOT NULL DEFAULT now()
 );

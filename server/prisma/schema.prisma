@@ -61,6 +61,7 @@ model Report {
   user        User           @relation(fields: [userId], references: [id])
   name        String         @db.VarChar(255)
   description String?
+  filters     Json           @default("[]") @map("filters")
   createdAt   DateTime       @default(now()) @map("created_at")
   updatedAt   DateTime       @default(now()) @map("updated_at")
   widgets     ReportWidget[]
