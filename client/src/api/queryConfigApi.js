@@ -12,8 +12,8 @@ async function runRequest(id) {
   return res.data; // { id, name, suggestedChartType, columns[], rows[] }
 }
 
-async function runManyRequest(ids) {
-  const res = await apiClient.post('/query-configs/run-batch', { ids });
+async function runManyRequest(ids, filters) {
+  const res = await apiClient.post('/query-configs/run-batch', { ids, filters });
   return res.data; // { results: [...] }
 }
 
