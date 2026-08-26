@@ -5,6 +5,7 @@ import {
   assignLegacyPages,
   groupByPage,
   computeAddPlacement,
+  findDropTargetPage,
 } from './pagination.js';
 
 assert.equal(GRID_ROWS, 36);
@@ -67,5 +68,17 @@ assert.deepEqual(
   computeAddPlacement([[{ layout: { y: 0, h: 10 } }]]), // bottom=10, +10=20<=36 -> vẫn trang cũ
   { page: 0, y: Infinity }
 );
+
+// findDropTargetPage
+const rects = [
+  { left: 0, top: 0, right: 100, bottom: 100 }, // trang 0
+  { left: 0, top: 120, right: 100, bottom: 220 }, // trang 1
+  null, // trang 2, ref chưa gắn (chưa render/đã unmount)
+];
+assert.equal(findDropTargetPage(rects, { x: 50, y: 150 }, 0), 1); // thả vào trang 1
+assert.equal(findDropTargetPage(rects, { x: 50, y: 50 }, 0), -1); // thả lại đúng trang gốc -> không tính
+assert.equal(findDropTargetPage(rects, { x: 50, y: 50 }, 1), 0); // gốc là trang 1, thả vào trang 0
+assert.equal(findDropTargetPage(rects, { x: 500, y: 500 }, 0), -1); // ngoài mọi trang
+assert.equal(findDropTargetPage(rects, { x: 50, y: 50 }, 2), 0); // ref null của excludeIndex vẫn hoạt động
 
 console.log('pagination.test.js: all assertions passed');

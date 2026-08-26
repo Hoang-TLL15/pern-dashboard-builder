@@ -3,6 +3,23 @@
 // trang cố định 1920x1080 (16:9). 36 hàng x rowHeight thiết kế 30px = 1080px.
 export const GRID_COLS = 24;
 export const GRID_ROWS = 36;
+export const DESIGN_WIDTH = 1920;
+export const DESIGN_HEIGHT = 1080;
+export const DESIGN_MARGIN = 8;
+export const DESIGN_ROW_HEIGHT = (DESIGN_HEIGHT - (GRID_ROWS - 1) * DESIGN_MARGIN) / GRID_ROWS;
+// Tham số hình học dùng chung cho mọi phép quy đổi pixel<->lưới của
+// react-grid-layout (calcXY/calcGridItemPosition, từ 'react-grid-layout/core')
+// — 1 nguồn duy nhất để ReportPage (grid thật) và ReportEditor (tính ghost
+// preview + toạ độ thả lúc kéo-qua-trang) luôn ra cùng 1 kết quả, không lệch
+// pixel do khai báo trùng lặp ở 2 nơi.
+export const GRID_POSITION_PARAMS = {
+  margin: [DESIGN_MARGIN, DESIGN_MARGIN],
+  containerPadding: [0, 0],
+  cols: GRID_COLS,
+  rowHeight: DESIGN_ROW_HEIGHT,
+  maxRows: GRID_ROWS,
+  containerWidth: DESIGN_WIDTH,
+};
 export const NEW_WIDGET_LAYOUT = { w: 12, h: 10, minW: 2, minH: 4 };
 // Widget chữ mặc định thấp hơn nhiều so với chart — 1 dòng tiêu đề/kết luận
 // không cần cao 10 hàng như chart, để trống nhiều khoảng trắng trên dưới.
@@ -62,6 +79,24 @@ export function assignLegacyPages(widgetsInOrder) {
 export function groupByPage(widgets) {
   const pageCount = widgets.length === 0 ? 1 : Math.max(...widgets.map((w) => w.layout.page)) + 1;
   return Array.from({ length: pageCount }, (_, i) => widgets.filter((w) => w.layout.page === i));
+}
+
+// Tìm trang mà 1 điểm thả chuột (toạ độ viewport) rơi vào, dùng cho việc kéo
+// widget từ trang này sang trang khác — pageRects là bounding rect (hoặc
+// null nếu ref chưa gắn) của từng trang đang render, theo đúng thứ tự
+// pageIndex; loại trừ excludeIndex (trang gốc của widget đang kéo) vì thả lại
+// đúng trang cũ không tính là "chuyển trang". Trả về -1 nếu điểm thả không
+// rơi vào trang nào khác.
+export function findDropTargetPage(pageRects, point, excludeIndex) {
+  return pageRects.findIndex(
+    (rect, i) =>
+      i !== excludeIndex &&
+      rect &&
+      point.x >= rect.left &&
+      point.x <= rect.right &&
+      point.y >= rect.top &&
+      point.y <= rect.bottom
+  );
 }
 
 // Vị trí cho 1 widget mới: thêm vào cuối trang cuối; nếu không đủ chỗ (vượt
