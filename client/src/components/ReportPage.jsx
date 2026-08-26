@@ -13,18 +13,25 @@
 // ngược lại đúng công thức đó (với containerPadding=[0,0]) để 36 hàng luôn
 // vừa khít 1080px, không bị `.report-page` clip mất phần dưới.
 import { ReactGridLayout } from 'react-grid-layout/legacy';
+import { calcGridItemPosition } from 'react-grid-layout/core';
 import 'react-grid-layout/css/styles.css';
-import { GRID_COLS, GRID_ROWS } from '../reports/pagination';
-
-const DESIGN_WIDTH = 1920;
-const DESIGN_HEIGHT = 1080;
-const DESIGN_MARGIN = 8;
-const DESIGN_ROW_HEIGHT = (DESIGN_HEIGHT - (GRID_ROWS - 1) * DESIGN_MARGIN) / GRID_ROWS;
+import {
+  GRID_COLS,
+  GRID_ROWS,
+  DESIGN_WIDTH,
+  DESIGN_HEIGHT,
+  DESIGN_MARGIN,
+  DESIGN_ROW_HEIGHT,
+  GRID_POSITION_PARAMS,
+} from '../reports/pagination';
 
 export default function ReportPage({
   pageIndex,
   widgets,
   onLayoutChange,
+  onWidgetDrag,
+  onWidgetDragStop,
+  previewItem,
   renderWidget,
   pageRef,
   draggableCancel,
@@ -61,9 +68,27 @@ export default function ReportPage({
           useCSSTransforms={false}
           draggableCancel={draggableCancel}
           onLayoutChange={(newLayout) => onLayoutChange(pageIndex, newLayout)}
+          // Báo lên cha toạ độ chuột thật (e.clientX/Y, không phải toạ độ
+          // lưới) trong suốt lúc kéo và lúc thả — để cha tự so với vùng DOM
+          // của các trang KHÁC, phát hiện kéo-sang-trang-khác (xem
+          // handleWidgetDrag/handleWidgetDragStop ở ReportEditor). isBounded
+          // giữ widget trong đúng trang này suốt lúc kéo nên bản thân widget
+          // không thể trôi hình sang trang khác — cha tự vẽ 1 khung ghost đè
+          // lên trang đích (previewItem) thay cho việc đó.
+          onDrag={(layout, oldItem, newItem, placeholder, e) => onWidgetDrag(pageIndex, newItem, e)}
+          onDragStop={(layout, oldItem, newItem, placeholder, e) => onWidgetDragStop(pageIndex, newItem, e)}
         >
           {widgets.map((w) => renderWidget(w))}
         </ReactGridLayout>
+        {previewItem && (
+          <div
+            className="widget-drag-ghost"
+            style={{
+              position: 'absolute',
+              ...calcGridItemPosition(GRID_POSITION_PARAMS, previewItem.x, previewItem.y, previewItem.w, previewItem.h),
+            }}
+          />
+        )}
       </div>
     </div>
   );

@@ -718,6 +718,19 @@
   margin-bottom: 24px;
 }
 
+/* Khung xem trước lúc kéo widget sang trang khác — vẽ đè lên trang đích,
+   không phải 1 item thật trong layout của react-grid-layout (tránh việc thêm
+   nó vào layout kích hoạt compaction/onLayoutChange và lỡ tay lưu lại vị trí
+   bị dồn của các widget khác trên trang đó chỉ vì đang rê chuột ngang qua).
+   transform trên .report-page-canvas tự tạo containing block nên position:
+   absolute ở đây neo đúng theo gốc (0,0) của canvas thiết kế 1920x1080. */
+.widget-drag-ghost {
+  border: 2px dashed var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  border-radius: 12px;
+  pointer-events: none;
+}
+
 .widget-card {
   background: var(--color-surface);
   border: 1px solid var(--color-border);

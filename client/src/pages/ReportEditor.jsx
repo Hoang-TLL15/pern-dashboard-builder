@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
+import { calcXY } from 'react-grid-layout/core';
 import { useAuth } from '../context/AuthContext';
 import reportService from '../services/reportService';
 import dbConnectionService from '../services/dbConnectionService';
@@ -14,11 +15,14 @@ import TextWidgetEditor from '../components/TextWidgetEditor';
 import { getApplicableChartTypes, pickChartType } from '../charts/chartAdapter';
 import { applyFilters } from '../charts/filterRows';
 import {
+  DESIGN_WIDTH,
+  GRID_POSITION_PARAMS,
   GRID_ROWS,
   NEW_WIDGET_LAYOUT,
   NEW_TEXT_WIDGET_LAYOUT,
   assignLegacyPages,
   computeAddPlacement,
+  findDropTargetPage,
   groupByPage,
   isLegacyReport,
 } from '../reports/pagination';
@@ -110,6 +114,11 @@ export default function ReportEditor() {
 
   const [presentPageIndex, setPresentPageIndex] = useState(null); // null = không trình chiếu
   const [presentDisplayWidth, setPresentDisplayWidth] = useState(1280);
+
+  // Khung xem trước lúc kéo widget sang trang khác: { targetPage, x, y, w, h }
+  // (toạ độ lưới của trang đích) hoặc null khi không kéo/con trỏ chưa chạm
+  // trang nào khác — xem handleWidgetDrag.
+  const [dragPreview, setDragPreview] = useState(null);
 
   const pageRefs = useRef([]); // DOM node của từng trang, dùng để xuất PDF theo từng trang
   const presentRef = useRef(null);
@@ -421,6 +430,48 @@ export default function ReportEditor() {
         w.key === key
           ? { ...w, layout: { ...w.layout, page: w.layout.page + direction, y: Infinity } }
           : w
+      )
+    );
+  }
+
+  // Con trỏ chuột (toạ độ viewport, e.clientX/Y) đang ở trên vùng DOM của 1
+  // trang KHÁC trang gốc (pageIndex) trong lúc kéo widget `item` hay không —
+  // nếu có, quy đổi ngược pixel màn hình đó về toạ độ lưới của TRANG ĐÍCH
+  // bằng calcXY (cùng công thức react-grid-layout tự dùng nội bộ, xem
+  // GRID_POSITION_PARAMS) để cả ghost preview lẫn vị trí thả cuối cùng khớp
+  // đúng pixel với nhau. isBounded giữ bản thân widget trong đúng grid của
+  // trang gốc suốt lúc kéo (không có toạ độ lưới "thật" ở trang khác để lấy
+  // trực tiếp từ react-grid-layout) nên phải tự tính lại từ toạ độ chuột.
+  function locateDrop(pageIndex, item, e) {
+    const rects = pageRefs.current.map((el) => (el ? el.getBoundingClientRect() : null));
+    const targetPage = findDropTargetPage(rects, { x: e.clientX, y: e.clientY }, pageIndex);
+    if (targetPage === -1) return null;
+    const rect = rects[targetPage];
+    const scale = rect.width / DESIGN_WIDTH;
+    const left = (e.clientX - rect.left) / scale;
+    const top = (e.clientY - rect.top) / scale;
+    const { x, y } = calcXY(GRID_POSITION_PARAMS, top, left, item.w, item.h);
+    return { targetPage, x, y, w: item.w, h: item.h };
+  }
+
+  // Cập nhật khung ghost xem trước trong suốt lúc kéo (xem dragPreview state
+  // + .widget-drag-ghost trong ReportPage) — thuần hiển thị, KHÔNG đụng vào
+  // widgets state, nên không có rủi ro "chỉ rê chuột ngang qua cũng bị lưu
+  // nhầm vị trí".
+  function handleWidgetDrag(pageIndex, item, e) {
+    setDragPreview(locateDrop(pageIndex, item, e));
+  }
+
+  // Thả tay: nếu con trỏ đang ở trên 1 trang khác, chuyển hẳn widget sang
+  // đúng ô lưới đó (không còn xếp "cuối trang" như handleMovePage nữa — giờ
+  // đã có toạ độ chính xác theo điểm thả).
+  function handleWidgetDragStop(pageIndex, item, e) {
+    const drop = locateDrop(pageIndex, item, e);
+    setDragPreview(null);
+    if (!drop) return;
+    setWidgets((prev) =>
+      prev.map((w) =>
+        w.key === item.i ? { ...w, layout: { ...w.layout, page: drop.targetPage, x: drop.x, y: drop.y } } : w
       )
     );
   }
@@ -909,6 +960,9 @@ export default function ReportEditor() {
                   pageIndex={pageIndex}
                   widgets={pageWidgets}
                   onLayoutChange={handleGridLayoutChange}
+                  onWidgetDrag={handleWidgetDrag}
+                  onWidgetDragStop={handleWidgetDragStop}
+                  previewItem={dragPreview && dragPreview.targetPage === pageIndex ? dragPreview : null}
                   pageRef={(el) => {
                     pageRefs.current[pageIndex] = el;
                   }}
@@ -931,6 +985,8 @@ export default function ReportEditor() {
                   pageIndex={presentPageIndex}
                   widgets={pages[presentPageIndex]}
                   onLayoutChange={() => {}}
+                  onWidgetDrag={() => {}}
+                  onWidgetDragStop={() => {}}
                   pageRef={() => {}}
                   draggableCancel=""
                   displayWidth={presentDisplayWidth}
