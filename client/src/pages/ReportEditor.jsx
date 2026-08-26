@@ -991,7 +991,9 @@ export default function ReportEditor() {
             </div>
           </div>
 
-          <ReportFilterBar filterDefs={filterDefs} values={filterValues} onApply={handleApplyFilters} />
+          {!isPresenting && (
+            <ReportFilterBar filterDefs={filterDefs} values={filterValues} onApply={handleApplyFilters} />
+          )}
           {filterApplyError && <p className="form-message error">{filterApplyError}</p>}
 
           <div className="report-pages-toolbar">
