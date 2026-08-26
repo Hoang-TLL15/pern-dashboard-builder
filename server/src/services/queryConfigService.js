@@ -7,20 +7,36 @@ const dataSourcePool = require('../db/dataSourcePool');
 const drivers = require('../db/drivers');
 const AppError = require('../utils/AppError');
 const sqlValidator = require('./sqlValidator');
+const sqlParams = require('./sqlParams');
 
-// Cache kết quả chạy query theo query_configs.id, TTL ngắn để giảm tải DB
-// nguồn khi nhiều request cùng chạy 1 query trong thời gian ngắn (vd. nhiều
-// widget dùng chung 1 query config trên cùng report). update()/remove() xoá
-// entry tương ứng khỏi cache vì query text có thể đã đổi.
+// Cache kết quả chạy query theo query_configs.id + giá trị filter liên quan, TTL
+// ngắn để giảm tải DB nguồn khi nhiều request cùng chạy 1 query trong thời gian
+// ngắn (vd. nhiều widget dùng chung 1 query config trên cùng report). update()/
+// remove() xoá mọi entry của id đó khỏi cache vì query text có thể đã đổi.
 const RUN_CACHE_TTL_MS = 30_000;
 const RUN_CACHE_SWEEP_INTERVAL_MS = 60 * 1000; // quét mỗi 1 phút, giống dataSourcePool.js
-const runCache = new Map(); // key: query_configs.id -> { data, expiresAt }
+const runCache = new Map(); // key: `${queryConfigId}::${sortedFilterValuesJson}` -> { data, expiresAt }
+
+function runCacheKey(queryConfigId, relevantValues) {
+  const sortedEntries = Object.entries(relevantValues).sort(([a], [b]) => a.localeCompare(b));
+  return `${queryConfigId}::${JSON.stringify(sortedEntries)}`;
+}
+
+// update()/remove() gọi hàm này để xoá MỌI biến thể cache của 1 query_config (mọi
+// giá trị filter đã từng chạy) — không chỉ 1 khoá đơn như trước, vì giờ 1 id có thể
+// có nhiều entry cache khác nhau theo filter.
+function clearRunCacheForId(queryConfigId) {
+  const prefix = `${queryConfigId}::`;
+  for (const key of runCache.keys()) {
+    if (key.startsWith(prefix)) runCache.delete(key);
+  }
+}
 
 function sweepExpiredRunCache() {
   const now = Date.now();
-  for (const [id, entry] of runCache.entries()) {
+  for (const [key, entry] of runCache.entries()) {
     if (entry.expiresAt <= now) {
-      runCache.delete(id);
+      runCache.delete(key);
     }
   }
 }
@@ -47,10 +63,10 @@ async function listByDbConnectionId(dbConnectionId) {
   return queryConfigRepository.findByDbConnectionId(numericId);
 }
 
-// Chạy 1 câu SQL trên connection đã biết, map cột theo driver — dùng chung
-// bởi executeQueryConfig() (SQL đã duyệt, có cache) và previewQuery() (SQL
-// ad-hoc do user gõ, không cache vì không có query_configs.id làm key).
-async function runSqlOnConnection(connection, sql) {
+// Chạy 1 câu SQL đã dịch xong tham số (compileParams) trên 1 connection đã biết —
+// dùng chung bởi executeQueryConfig() (SQL đã duyệt, có cache) và previewQuery() (SQL
+// ad-hoc do user gõ, không tham số, không cache).
+async function runSqlOnConnection(connection, sql, values) {
   const driver = drivers[connection.dbType];
   if (!driver) {
     throw new AppError(`Chưa hỗ trợ loại DB "${connection.dbType}"`, 400);
@@ -61,7 +77,7 @@ async function runSqlOnConnection(connection, sql) {
 
   let result;
   try {
-    result = await driver.runQuery(pool, cappedSql);
+    result = await driver.runQuery(pool, cappedSql, values);
   } catch (err) {
     if (driver.isTimeoutError(err)) {
       throw new AppError('Truy vấn chạy quá lâu và đã bị huỷ (timeout)', 504);
@@ -81,10 +97,32 @@ async function runSqlOnConnection(connection, sql) {
   return { columns, rows: result.rows };
 }
 
-// Chạy 1 queryConfig đã biết trước connection (không đụng DB nào khác) —
-// dùng chung bởi run() và runMany() để tránh lặp logic.
-async function executeQueryConfig(queryConfig, connection) {
-  const { columns, rows } = await runSqlOnConnection(connection, queryConfig.query);
+// Chạy 1 queryConfig đã biết trước connection — dịch :paramName (nếu SQL có dùng)
+// sang cú pháp gốc của dbType rồi mới capRowLimit/execute (node-sql-parser không hiểu
+// ":paramName", xem sqlParams.js). filterValues là TOÀN BỘ giá trị filter hiện tại của
+// report; chỉ phần liên quan tới paramNames thực sự xuất hiện trong SQL của chính
+// query_config này mới được lấy ra để bind — query không dùng :param nào thì không bị
+// ảnh hưởng bởi filter của report.
+async function executeQueryConfig(queryConfig, connection, filterValues = {}) {
+  const { sql: compiledSql, paramNames, buildValues } = sqlParams.compileParams(
+    queryConfig.query,
+    connection.dbType
+  );
+
+  const relevantValues = {};
+  for (const name of paramNames) relevantValues[name] = filterValues[name];
+
+  const cacheKey = runCacheKey(queryConfig.id, relevantValues);
+  const cached = runCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.data;
+  }
+
+  const { columns, rows } = await runSqlOnConnection(
+    connection,
+    compiledSql,
+    buildValues(relevantValues)
+  );
 
   const data = {
     id: queryConfig.id,
@@ -94,7 +132,7 @@ async function executeQueryConfig(queryConfig, connection) {
     columns,
     rows,
   };
-  runCache.set(queryConfig.id, { data, expiresAt: Date.now() + RUN_CACHE_TTL_MS });
+  runCache.set(cacheKey, { data, expiresAt: Date.now() + RUN_CACHE_TTL_MS });
   return data;
 }
 
@@ -121,13 +159,8 @@ function toValidId(id) {
   return numericId;
 }
 
-async function run(id) {
+async function run(id, filterValues = {}) {
   const numericId = toValidId(id);
-
-  const cached = runCache.get(numericId);
-  if (cached && cached.expiresAt > Date.now()) {
-    return cached.data;
-  }
 
   const queryConfig = await queryConfigRepository.findById(numericId);
   if (!queryConfig) {
@@ -141,7 +174,7 @@ async function run(id) {
     throw new AppError('Không tìm thấy kết nối nguồn dữ liệu', 404);
   }
 
-  return executeQueryConfig(queryConfig, connection);
+  return executeQueryConfig(queryConfig, connection, filterValues);
 }
 
 // Chạy nhiều query_configs cùng lúc (vd. tải hết widget của 1 report) —
@@ -150,8 +183,11 @@ async function run(id) {
 // từng id) xuống còn 2 round-trip (findMany ... in ids). Việc chạy SQL thật
 // trên Data Source DB thì không gộp được — mỗi query_config có thể là SQL
 // khác nhau trên connection khác nhau — nên vẫn là N lệnh, chạy song song
-// qua Promise.all thay vì tuần tự.
-async function runMany(ids) {
+// qua Promise.all thay vì tuần tự. Không còn lọc uncachedIds trước khi load
+// metadata (cache giờ phụ thuộc giá trị filter, không biết trước khi đã load
+// queryConfig.query để compileParams) — Meta DB là Postgres local, rẻ hơn
+// nhiều so với Data Source DB mà cache thật sự bảo vệ.
+async function runMany(ids, filterValues = {}) {
   if (!Array.isArray(ids)) {
     throw new AppError('ids phải là mảng', 400);
   }
@@ -161,38 +197,26 @@ async function runMany(ids) {
     throw new AppError(`Chỉ được chạy tối đa ${MAX_RUN_MANY_IDS} query cùng lúc`, 400);
   }
 
-  const now = Date.now();
-  const resultsById = new Map();
-  const uncachedIds = uniqueIds.filter((uid) => {
-    const cached = runCache.get(uid);
-    if (cached && cached.expiresAt > now) {
-      resultsById.set(uid, cached.data);
-      return false;
-    }
-    return true;
-  });
-
-  if (uncachedIds.length > 0) {
-    const queryConfigs = await queryConfigRepository.findByIds(uncachedIds);
-    const missingId = uncachedIds.find((uid) => !queryConfigs.some((qc) => qc.id === uid));
-    if (missingId !== undefined) {
-      throw new AppError('Không tìm thấy query config', 404);
-    }
-
-    const dbConnectionIds = [...new Set(queryConfigs.map((qc) => qc.dbConnectionId))];
-    const connections = await dbConnectionRepository.findByIdsWithCredentials(dbConnectionIds);
-    const connectionsById = new Map(connections.map((c) => [c.id, c]));
-
-    await Promise.all(
-      queryConfigs.map(async (queryConfig) => {
-        const connection = connectionsById.get(queryConfig.dbConnectionId);
-        if (!connection) {
-          throw new AppError('Không tìm thấy kết nối nguồn dữ liệu', 404);
-        }
-        resultsById.set(queryConfig.id, await executeQueryConfig(queryConfig, connection));
-      })
-    );
+  const queryConfigs = await queryConfigRepository.findByIds(uniqueIds);
+  const missingId = uniqueIds.find((uid) => !queryConfigs.some((qc) => qc.id === uid));
+  if (missingId !== undefined) {
+    throw new AppError('Không tìm thấy query config', 404);
   }
+
+  const dbConnectionIds = [...new Set(queryConfigs.map((qc) => qc.dbConnectionId))];
+  const connections = await dbConnectionRepository.findByIdsWithCredentials(dbConnectionIds);
+  const connectionsById = new Map(connections.map((c) => [c.id, c]));
+
+  const resultsById = new Map();
+  await Promise.all(
+    queryConfigs.map(async (queryConfig) => {
+      const connection = connectionsById.get(queryConfig.dbConnectionId);
+      if (!connection) {
+        throw new AppError('Không tìm thấy kết nối nguồn dữ liệu', 404);
+      }
+      resultsById.set(queryConfig.id, await executeQueryConfig(queryConfig, connection, filterValues));
+    })
+  );
 
   return numericIds.map((uid) => resultsById.get(uid));
 }
@@ -211,7 +235,8 @@ async function create({ dbConnectionId, name, description, query, suggestedChart
     throw new AppError('Tên query không được để trống', 400);
   }
 
-  sqlValidator.assertSelectOnly(query, connection.dbType);
+  const { sql: compiledSql } = sqlParams.compileParams(query, connection.dbType);
+  sqlValidator.assertSelectOnly(compiledSql, connection.dbType);
 
   return queryConfigRepository.create({
     dbConnectionId: numericId,
@@ -241,7 +266,8 @@ async function update(id, { name, description, query, suggestedChartType }) {
     throw new AppError('Không tìm thấy kết nối', 404);
   }
 
-  sqlValidator.assertSelectOnly(query, connection.dbType);
+  const { sql: compiledSql } = sqlParams.compileParams(query, connection.dbType);
+  sqlValidator.assertSelectOnly(compiledSql, connection.dbType);
 
   const updated = await queryConfigRepository.update(numericId, {
     name,
@@ -249,7 +275,7 @@ async function update(id, { name, description, query, suggestedChartType }) {
     query,
     suggestedChartType,
   });
-  runCache.delete(numericId);
+  clearRunCacheForId(numericId);
   return updated;
 }
 
@@ -274,7 +300,7 @@ async function remove(id) {
   }
 
   await queryConfigRepository.remove(numericId);
-  runCache.delete(numericId);
+  clearRunCacheForId(numericId);
 }
 
 module.exports = {
