@@ -14,7 +14,7 @@ async function listByDbConnectionId(req, res, next) {
 
 async function run(req, res, next) {
   try {
-    const result = await queryConfigService.run(req.params.id);
+    const result = await queryConfigService.run(req.params.id, req.query);
     return res.json(result);
   } catch (err) {
     return next(err);

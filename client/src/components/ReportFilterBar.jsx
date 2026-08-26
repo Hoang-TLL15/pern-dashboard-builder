@@ -1,7 +1,8 @@
 // src/components/ReportFilterBar.jsx
-// Thanh nhập GIÁ TRỊ global filter hiện tại của report (khác ReportFilterEditor.jsx,
-// vốn chỉnh ĐỊNH NGHĨA filter) — dùng chung cho cả canvas lúc chỉnh sửa lẫn khung
-// trình chiếu toàn màn hình (ReportEditor là page duy nhất phục vụ cả 2 vai trò).
+// Thanh nhập GIÁ TRỊ global filter hiện tại của report — filterDefs được ReportEditor
+// tự suy ra từ :paramName có trong SQL của các widget, không có bước khai báo thủ
+// công. Dùng chung cho cả canvas lúc chỉnh sửa lẫn khung trình chiếu toàn màn hình
+// (ReportEditor là page duy nhất phục vụ cả 2 vai trò).
 // Đổi giá trị chỉ cập nhật state cục bộ (draft) — phải bấm "Áp dụng" mới báo lên cha,
 // tránh gọi lại API run-batch theo từng keystroke.
 import { useState } from 'react';

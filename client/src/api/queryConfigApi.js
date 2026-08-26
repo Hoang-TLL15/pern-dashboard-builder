@@ -7,8 +7,8 @@ async function listByDbConnectionIdRequest(dbConnectionId) {
   return res.data; // { queryConfigs }
 }
 
-async function runRequest(id) {
-  const res = await apiClient.get(`/query-configs/${id}/run`);
+async function runRequest(id, filters) {
+  const res = await apiClient.get(`/query-configs/${id}/run`, { params: filters });
   return res.data; // { id, name, suggestedChartType, columns[], rows[] }
 }
 

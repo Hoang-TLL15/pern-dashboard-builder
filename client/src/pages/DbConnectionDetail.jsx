@@ -7,6 +7,7 @@ import ChartRenderer from '../components/ChartRenderer';
 import ErdDiagram from '../components/ErdDiagram';
 import Spinner from '../components/Spinner';
 import { getApplicableChartTypes, pickChartType } from '../charts/chartAdapter';
+import { detectParamNames } from '../utils/sqlParams';
 
 export default function DbConnectionDetail() {
   const { id } = useParams();
@@ -19,6 +20,7 @@ export default function DbConnectionDetail() {
   const [queryConfigsLoading, setQueryConfigsLoading] = useState(true);
   const [selectedId, setSelectedId] = useState(null);
   const [runResult, setRunResult] = useState(null);
+  const [runParamValues, setRunParamValues] = useState({}); // giá trị :paramName gõ để chạy thử
   const [runError, setRunError] = useState('');
   const [runLoading, setRunLoading] = useState(false);
   const [chartType, setChartType] = useState(null);
@@ -99,7 +101,10 @@ export default function DbConnectionDetail() {
     }
   }
 
-  async function handleSelectQueryConfig(queryConfigId) {
+  // paramValues mặc định rỗng khi chọn 1 query mới (query khác có thể không cùng
+  // :paramName) — handleSaveQueryConfigEdit và nút "Chạy lại" truyền lại runParamValues
+  // hiện tại để giữ nguyên giá trị đang gõ khi chỉ sửa SQL hoặc gõ lại tham số.
+  async function handleSelectQueryConfig(queryConfigId, paramValues = {}) {
     setSelectedId(queryConfigId);
     setPreviewResult(null);
     setPreviewError('');
@@ -108,9 +113,10 @@ export default function DbConnectionDetail() {
     setEditError('');
     setRunResult(null);
     setRunError('');
+    setRunParamValues(paramValues);
     setRunLoading(true);
     try {
-      const data = await queryConfigService.run(queryConfigId);
+      const data = await queryConfigService.run(queryConfigId, paramValues);
       setRunResult(data);
       setChartType(pickChartType(data, data.suggestedChartType));
     } catch (err) {
@@ -186,7 +192,7 @@ export default function DbConnectionDetail() {
       const updated = await queryConfigService.update(selectedId, editForm);
       setQueryConfigs((prev) => prev.map((q) => (q.id === updated.id ? updated : q)));
       setEditForm(null);
-      await handleSelectQueryConfig(selectedId);
+      await handleSelectQueryConfig(selectedId, runParamValues);
     } catch (err) {
       setEditError(err.response?.data?.error || 'Không lưu được thay đổi');
     } finally {
@@ -382,6 +388,31 @@ export default function DbConnectionDetail() {
                       <pre className="query-sql-block">
                         <code>{runResult.query}</code>
                       </pre>
+                    )}
+
+                    {!editForm && detectParamNames(runResult.query).length > 0 && (
+                      <div className="widget-picker-params">
+                        {detectParamNames(runResult.query).map((p) => (
+                          <div className="widget-picker-params-item" key={p}>
+                            <label htmlFor={`run-param-${p}`}>{p}</label>
+                            <input
+                              id={`run-param-${p}`}
+                              type="text"
+                              value={runParamValues[p] ?? ''}
+                              onChange={(e) =>
+                                setRunParamValues((prev) => ({ ...prev, [p]: e.target.value }))
+                              }
+                            />
+                          </div>
+                        ))}
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          onClick={() => handleSelectQueryConfig(selectedId, runParamValues)}
+                        >
+                          Chạy lại
+                        </button>
+                      </div>
                     )}
 
                     {editForm && (

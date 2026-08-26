@@ -7,8 +7,8 @@ async function listByDbConnectionId(dbConnectionId) {
   return queryConfigs;
 }
 
-async function run(id) {
-  return queryConfigApi.runRequest(id);
+async function run(id, filters) {
+  return queryConfigApi.runRequest(id, filters);
 }
 
 async function runMany(ids, filters) {

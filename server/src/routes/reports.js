@@ -13,6 +13,7 @@ router.get('/reports', reportController.list);
 router.post('/reports', reportController.create);
 router.get('/reports/:id', reportController.getById);
 router.put('/reports/:id', reportController.update);
+router.patch('/reports/:id/filter-values', reportController.updateFilterValues);
 router.delete('/reports/:id', reportController.remove);
 
 module.exports = router;

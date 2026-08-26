@@ -22,8 +22,12 @@ async function update(id, payload) {
   return report;
 }
 
+async function updateFilterValues(id, filterValues) {
+  return reportApi.updateFilterValuesRequest(id, filterValues);
+}
+
 async function remove(id) {
   return reportApi.deleteRequest(id);
 }
 
-export default { list, getById, create, update, remove };
+export default { list, getById, create, update, updateFilterValues, remove };

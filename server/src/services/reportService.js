@@ -19,37 +19,6 @@ const ALLOWED_CHART_TYPES = [
   'table',
 ];
 
-const ALLOWED_FILTER_TYPES = ['number', 'text', 'date'];
-const PARAM_NAME_PATTERN = /^[a-zA-Z_]\w*$/;
-
-// Validate danh sách ĐỊNH NGHĨA global filter của report (không phải giá trị đang
-// chọn — giá trị chỉ tồn tại phía client, xem ReportFilterBar.jsx). paramName phải
-// khớp regex vì nó được ghép thẳng thành "@paramName" khi chạy trên MSSQL
-// (sqlParams.js) — chặn injection qua chính tên tham số nếu ai gọi thẳng API.
-function validateFilters(filters) {
-  if (filters === undefined) return [];
-  if (!Array.isArray(filters)) {
-    throw new AppError('filters phải là 1 mảng', 400);
-  }
-  return filters.map((f) => {
-    if (typeof f.paramName !== 'string' || !PARAM_NAME_PATTERN.test(f.paramName)) {
-      throw new AppError(`filter.paramName không hợp lệ: ${f.paramName}`, 400);
-    }
-    if (typeof f.label !== 'string' || !f.label.trim()) {
-      throw new AppError('filter.label không được để trống', 400);
-    }
-    if (!ALLOWED_FILTER_TYPES.includes(f.type)) {
-      throw new AppError(`filter.type không hợp lệ: ${f.type}`, 400);
-    }
-    return {
-      paramName: f.paramName,
-      label: f.label.trim(),
-      type: f.type,
-      defaultValue: typeof f.defaultValue === 'string' ? f.defaultValue : '',
-    };
-  });
-}
-
 function toNumericId(id) {
   const numericId = Number(id);
   if (!Number.isInteger(numericId)) {
@@ -88,7 +57,7 @@ function validateWidgets(widgets) {
   });
 }
 
-function validatePayload({ name, description, widgets, filters }) {
+function validatePayload({ name, description, widgets }) {
   if (typeof name !== 'string' || name.trim().length === 0) {
     throw new AppError('name không được để trống', 400);
   }
@@ -96,7 +65,6 @@ function validatePayload({ name, description, widgets, filters }) {
     name: name.trim(),
     description: typeof description === 'string' ? description : null,
     widgets: validateWidgets(widgets),
-    filters: validateFilters(filters),
   };
 }
 
@@ -136,10 +104,31 @@ async function remove(id, userId) {
   }
 }
 
+// Giá trị filter đang chọn (paramName tự dò từ SQL phía client, không phải
+// định nghĩa) — lưu để mở lại report không phải nhập lại. Không validate
+// paramName/type vì không còn khai báo nào để đối chiếu; chỉ chặn payload
+// không phải object phẳng (ObjectValue) để tránh lưu rác/mảng vào JSONB.
+function validateFilterValues(filterValues) {
+  if (typeof filterValues !== 'object' || filterValues === null || Array.isArray(filterValues)) {
+    throw new AppError('filterValues phải là 1 object', 400);
+  }
+  return filterValues;
+}
+
+async function updateFilterValues(id, userId, filterValues) {
+  const numericId = toNumericId(id);
+  const data = validateFilterValues(filterValues);
+  const updated = await reportRepository.updateFilterValues(numericId, userId, data);
+  if (!updated) {
+    throw new AppError('Không tìm thấy report', 404);
+  }
+}
+
 module.exports = {
   list,
   getById,
   create,
   update,
+  updateFilterValues,
   remove,
 };

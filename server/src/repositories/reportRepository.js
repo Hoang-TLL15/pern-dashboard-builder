@@ -32,13 +32,12 @@ async function findByIdForUser(id, userId) {
   });
 }
 
-async function createForUser(userId, { name, description, widgets, filters }) {
+async function createForUser(userId, { name, description, widgets }) {
   return prisma.report.create({
     data: {
       userId,
       name,
       description,
-      filters,
       widgets: {
         create: widgets.map((w, i) => ({
           widgetType: w.widgetType,
@@ -55,7 +54,7 @@ async function createForUser(userId, { name, description, widgets, filters }) {
 
 // "Xoá rồi chèn lại" toàn bộ widgets trong 1 transaction thay vì diff từng
 // widget — chấp nhận được vì 1 report thường chỉ có vài widget (mục 7 design doc).
-async function updateForUser(id, userId, { name, description, widgets, filters }) {
+async function updateForUser(id, userId, { name, description, widgets }) {
   return prisma.$transaction(async (tx) => {
     const existing = await tx.report.findFirst({ where: { id, userId } });
     if (!existing) return null;
@@ -67,7 +66,6 @@ async function updateForUser(id, userId, { name, description, widgets, filters }
       data: {
         name,
         description,
-        filters,
         updatedAt: new Date(),
         widgets: {
           create: widgets.map((w, i) => ({
@@ -91,6 +89,14 @@ async function deleteForUser(id, userId) {
   return result.count > 0;
 }
 
+// updateMany (không phải update) cùng lý do trên: ownership check nằm ngay
+// trong where, không phải query riêng rồi mới update. Không đụng updatedAt/
+// widgets — đây là lưu giá trị filter đang chọn (không phải thao tác "Lưu report").
+async function updateFilterValues(id, userId, filterValues) {
+  const result = await prisma.report.updateMany({ where: { id, userId }, data: { filterValues } });
+  return result.count > 0;
+}
+
 // Dùng bởi queryConfigService.remove() để chặn xoá 1 query_config đang được
 // report_widgets tham chiếu (FK query_config_id không có ON DELETE CASCADE).
 async function countByQueryConfigId(queryConfigId) {
@@ -102,6 +108,7 @@ module.exports = {
   findByIdForUser,
   createForUser,
   updateForUser,
+  updateFilterValues,
   deleteForUser,
   countByQueryConfigId,
 };
