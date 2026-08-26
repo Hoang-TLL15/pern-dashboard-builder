@@ -10,6 +10,8 @@ import queryConfigService from '../services/queryConfigService';
 import ChartRenderer from '../components/ChartRenderer';
 import Spinner from '../components/Spinner';
 import WidgetFilterEditor from '../components/WidgetFilterEditor';
+import ReportFilterEditor from '../components/ReportFilterEditor';
+import ReportFilterBar from '../components/ReportFilterBar';
 import ReportPage from '../components/ReportPage';
 import TextWidgetEditor from '../components/TextWidgetEditor';
 import { getApplicableChartTypes, pickChartType } from '../charts/chartAdapter';
@@ -101,6 +103,9 @@ export default function ReportEditor() {
   const [saving, setSaving] = useState(false);
   const [openFilterKeys, setOpenFilterKeys] = useState(() => new Set());
   const [saveError, setSaveError] = useState('');
+  const [filterDefs, setFilterDefs] = useState([]); // định nghĩa global filter của report
+  const [filterValues, setFilterValues] = useState({}); // giá trị đang chọn (không lưu DB)
+  const [filterApplyError, setFilterApplyError] = useState('');
 
   const [dbConnections, setDbConnections] = useState([]);
   const [pickerDbConnectionId, setPickerDbConnectionId] = useState('');
@@ -207,17 +212,29 @@ export default function ReportEditor() {
       setLoadError('');
       try {
         const report = await reportService.getById(id);
+        const globalFilters = report.filters || []; // đổi tên khác "filters" để không lẫn với w.chartConfig.filters (per-widget) bên dưới
+        const defaultValues = Object.fromEntries(
+          globalFilters.map((f) => [
+            f.paramName,
+            f.type === 'number' && f.defaultValue !== '' ? Number(f.defaultValue) : f.defaultValue,
+          ])
+        );
         const chartIndices = report.widgets
           .map((w, i) => ((w.widgetType ?? 'chart') === 'chart' ? i : -1))
           .filter((i) => i !== -1);
         const chartResults =
           chartIndices.length > 0
-            ? await queryConfigService.runMany(chartIndices.map((i) => report.widgets[i].queryConfigId))
+            ? await queryConfigService.runMany(
+                chartIndices.map((i) => report.widgets[i].queryConfigId),
+                defaultValues
+              )
             : [];
         const resultByIndex = new Map(chartIndices.map((origIdx, j) => [origIdx, chartResults[j]]));
         if (cancelled) return;
         setName(report.name);
         setDescription(report.description || '');
+        setFilterDefs(globalFilters);
+        setFilterValues(defaultValues);
         const legacy = isLegacyReport(report);
         const loaded = report.widgets.map((w, i) => {
           const widgetType = w.widgetType ?? 'chart';
@@ -596,6 +613,7 @@ export default function ReportEditor() {
     const payload = {
       name,
       description,
+      filters: filterDefs,
       widgets: widgets.map((w) => {
         const widgetType = w.widgetType ?? 'chart';
         if (widgetType === 'text') {
@@ -619,6 +637,25 @@ export default function ReportEditor() {
       setSaveError(err.response?.data?.error || 'Không lưu được report');
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function handleApplyFilters(newValues) {
+    setFilterValues(newValues);
+    const chartWidgets = widgets.filter((w) => (w.widgetType ?? 'chart') === 'chart');
+    if (chartWidgets.length === 0) return;
+    setFilterApplyError('');
+    try {
+      const results = await queryConfigService.runMany(
+        chartWidgets.map((w) => w.queryConfigId),
+        newValues
+      );
+      const resultByKey = new Map(chartWidgets.map((w, i) => [w.key, results[i]]));
+      setWidgets((prev) =>
+        prev.map((w) => (resultByKey.has(w.key) ? { ...w, runResult: resultByKey.get(w.key) } : w))
+      );
+    } catch (err) {
+      setFilterApplyError(err.response?.data?.error || 'Không áp dụng được filter');
     }
   }
 
@@ -764,6 +801,13 @@ export default function ReportEditor() {
                   onChange={(e) => setDescription(e.target.value)}
                 />
               </div>
+            </div>
+          </div>
+
+          <div className="detail-card-wrap">
+            <div className="detail-card">
+              <h2 className="section-title">Global filter</h2>
+              <ReportFilterEditor filters={filterDefs} onChange={setFilterDefs} />
             </div>
           </div>
 
@@ -947,6 +991,9 @@ export default function ReportEditor() {
             </div>
           </div>
 
+          <ReportFilterBar filterDefs={filterDefs} values={filterValues} onApply={handleApplyFilters} />
+          {filterApplyError && <p className="form-message error">{filterApplyError}</p>}
+
           <div className="report-pages-toolbar">
             <button type="button" className="ghost-button" disabled={widgets.length === 0} onClick={handlePresent}>
               Toàn màn hình
@@ -979,6 +1026,7 @@ export default function ReportEditor() {
                 <span className="present-page-indicator">
                   Trang {presentPageIndex + 1}/{pages.length}
                 </span>
+                <ReportFilterBar filterDefs={filterDefs} values={filterValues} onApply={handleApplyFilters} />
               </div>
               <div className="present-stage">
                 <ReportPage

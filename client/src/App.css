@@ -989,3 +989,29 @@
   font-size: 12.5px;
   padding: 6px 8px;
 }
+
+.report-filter-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.report-filter-editor-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.report-filter-bar {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.report-filter-bar-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+}
