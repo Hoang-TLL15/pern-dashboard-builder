@@ -15,7 +15,9 @@ const ALLOWED_CHART_TYPES = [
   'radar',
   'scatter',
   'bubble',
+  'combo',
   'metric',
+  'metric_delta',
   'table',
 ];
 

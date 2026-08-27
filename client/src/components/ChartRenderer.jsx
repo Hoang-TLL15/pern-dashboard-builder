@@ -4,13 +4,16 @@
 // chart — chartType luôn do component cha (DbConnectionDetail) điều khiển.
 import '../charts/registerChartjs';
 import { Bar, Line, Pie, Doughnut, Radar, Scatter, Bubble } from 'react-chartjs-2';
-import { buildChartConfig, buildMetric } from '../charts/chartAdapter';
+import { buildChartConfig, buildMetric, buildMetricDelta } from '../charts/chartAdapter';
 
 const CHART_COMPONENT_BY_TYPE = {
   bar: Bar,
   stacked_bar: Bar,
   line: Line,
   area: Line,
+  // Combo (bar + line lẫn lộn) render qua <Bar>; type từng dataset do
+  // chartAdapter đặt, BarController/LineController đã đăng ký ở registerChartjs.
+  combo: Bar,
   pie: Pie,
   doughnut: Doughnut,
   radar: Radar,
@@ -60,6 +63,22 @@ export default function ChartRenderer({ runResult, chartType }) {
     return (
       <div className="metric-card">
         <span className="metric-value">{formatMetricValue(value)}</span>
+        {label && <span className="metric-label">{label}</span>}
+      </div>
+    );
+  }
+
+  if (chartType === 'metric_delta') {
+    const { label, value, previous, deltaPct } = buildMetricDelta(runResult);
+    const dir = deltaPct === null ? null : deltaPct >= 0 ? 'up' : 'down';
+    return (
+      <div className="metric-card">
+        <span className="metric-value">{formatMetricValue(value)}</span>
+        {dir && (
+          <span className={`metric-delta ${dir}`}>
+            {dir === 'up' ? '▲' : '▼'} {Math.abs(deltaPct).toFixed(1)}% so với {formatMetricValue(previous)}
+          </span>
+        )}
         {label && <span className="metric-label">{label}</span>}
       </div>
     );

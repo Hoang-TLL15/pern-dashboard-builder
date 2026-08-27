@@ -512,6 +512,20 @@
   color: var(--color-text-muted);
 }
 
+.metric-delta {
+  font-size: 14px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+}
+
+.metric-delta.up {
+  color: var(--color-success);
+}
+
+.metric-delta.down {
+  color: var(--color-error);
+}
+
 .query-sql-block {
   margin: 0 0 16px;
   padding: 12px 14px;
