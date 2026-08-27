@@ -116,6 +116,9 @@ export default function ReportEditor() {
   const [saveError, setSaveError] = useState('');
   const [filterValues, setFilterValues] = useState({}); // giá trị đang chọn (không lưu DB)
   const [filterApplyError, setFilterApplyError] = useState('');
+  // { paramName: ["opt1","opt2",...] } — list lựa chọn cho dropdown global filter,
+  // do report author tự thêm/xoá. Cấu hình authoring, lưu kèm khi "Lưu report".
+  const [filterOptions, setFilterOptions] = useState({});
   // Định nghĩa global filter luôn tự suy ra từ :paramName có trong SQL của các widget
   // đang có trong report — không lưu/khai báo thủ công, không lưu vào DB.
   const filterDefs = useMemo(
@@ -245,6 +248,7 @@ export default function ReportEditor() {
         setName(report.name);
         setDescription(report.description || '');
         setFilterValues(storedValues);
+        setFilterOptions(report.filterOptions || {});
         const legacy = isLegacyReport(report);
         const loaded = report.widgets.map((w, i) => {
           const widgetType = w.widgetType ?? 'chart';
@@ -461,6 +465,15 @@ export default function ReportEditor() {
     setWidgets((prev) => prev.map((w) => (w.key === key ? { ...w, filters } : w)));
   }
 
+  function handleFilterOptionsChange(paramName, list) {
+    setFilterOptions((prev) => {
+      const next = { ...prev };
+      if (list.length > 0) next[paramName] = list;
+      else delete next[paramName];
+      return next;
+    });
+  }
+
   // Chuyển widget sang trang trước/sau (direction = -1 hoặc +1). Đặt y:
   // Infinity để tự xếp xuống cuối trang đích, giống cơ chế thêm widget mới.
   // Nút "sang trang sau" ở widget cuối cùng của trang cuối cùng sẽ tạo trang
@@ -637,6 +650,7 @@ export default function ReportEditor() {
     const payload = {
       name,
       description,
+      filterOptions,
       widgets: widgets.map((w) => {
         const widgetType = w.widgetType ?? 'chart';
         if (widgetType === 'text') {
@@ -1031,7 +1045,14 @@ export default function ReportEditor() {
           </div>
 
           {!isPresenting && (
-            <ReportFilterBar filterDefs={filterDefs} values={filterValues} onApply={handleApplyFilters} />
+            <ReportFilterBar
+              filterDefs={filterDefs}
+              values={filterValues}
+              onApply={handleApplyFilters}
+              filterOptions={filterOptions}
+              editable
+              onFilterOptionsChange={handleFilterOptionsChange}
+            />
           )}
           {filterApplyError && <p className="form-message error">{filterApplyError}</p>}
 
@@ -1067,7 +1088,12 @@ export default function ReportEditor() {
                 <span className="present-page-indicator">
                   Trang {presentPageIndex + 1}/{pages.length}
                 </span>
-                <ReportFilterBar filterDefs={filterDefs} values={filterValues} onApply={handleApplyFilters} />
+                <ReportFilterBar
+                  filterDefs={filterDefs}
+                  values={filterValues}
+                  onApply={handleApplyFilters}
+                  filterOptions={filterOptions}
+                />
               </div>
               <div className="present-stage">
                 <ReportPage

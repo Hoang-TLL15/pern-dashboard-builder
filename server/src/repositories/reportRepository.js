@@ -32,12 +32,13 @@ async function findByIdForUser(id, userId) {
   });
 }
 
-async function createForUser(userId, { name, description, widgets }) {
+async function createForUser(userId, { name, description, widgets, filterOptions }) {
   return prisma.report.create({
     data: {
       userId,
       name,
       description,
+      filterOptions,
       widgets: {
         create: widgets.map((w, i) => ({
           widgetType: w.widgetType,
@@ -54,7 +55,7 @@ async function createForUser(userId, { name, description, widgets }) {
 
 // "Xoá rồi chèn lại" toàn bộ widgets trong 1 transaction thay vì diff từng
 // widget — chấp nhận được vì 1 report thường chỉ có vài widget (mục 7 design doc).
-async function updateForUser(id, userId, { name, description, widgets }) {
+async function updateForUser(id, userId, { name, description, widgets, filterOptions }) {
   return prisma.$transaction(async (tx) => {
     const existing = await tx.report.findFirst({ where: { id, userId } });
     if (!existing) return null;
@@ -66,6 +67,7 @@ async function updateForUser(id, userId, { name, description, widgets }) {
       data: {
         name,
         description,
+        filterOptions,
         updatedAt: new Date(),
         widgets: {
           create: widgets.map((w, i) => ({
