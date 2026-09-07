@@ -114,6 +114,7 @@ export default function ReportEditor() {
   const [saving, setSaving] = useState(false);
   const [openFilterKeys, setOpenFilterKeys] = useState(() => new Set());
   const [saveError, setSaveError] = useState('');
+  const [saved, setSaved] = useState(false); // hiện "Đã lưu" sau khi lưu report đang sửa (không rời trang)
   const [filterValues, setFilterValues] = useState({}); // giá trị đang chọn (không lưu DB)
   const [filterApplyError, setFilterApplyError] = useState('');
   // { paramName: ["opt1","opt2",...] } — list lựa chọn cho dropdown global filter,
@@ -222,6 +223,13 @@ export default function ReportEditor() {
     if (widgets.length === 0) return;
     setPresentPageIndex(0);
   }
+
+  // Tự ẩn "Đã lưu" sau vài giây (không rời trang nên cần tự dọn).
+  useEffect(() => {
+    if (!saved) return undefined;
+    const timer = setTimeout(() => setSaved(false), 3000);
+    return () => clearTimeout(timer);
+  }, [saved]);
 
   useEffect(() => {
     if (!isEditing) return;
@@ -647,6 +655,7 @@ export default function ReportEditor() {
   async function handleSave() {
     setSaving(true);
     setSaveError('');
+    setSaved(false);
     const payload = {
       name,
       description,
@@ -666,10 +675,11 @@ export default function ReportEditor() {
     try {
       if (isEditing) {
         await reportService.update(id, payload);
+        setSaved(true);
       } else {
-        await reportService.create(payload);
+        const created = await reportService.create(payload);
+        navigate(`/reports/${created.id}`); // vào thẳng trang sửa report vừa tạo, không nhảy về danh sách
       }
-      navigate('/reports');
     } catch (err) {
       setSaveError(err.response?.data?.error || 'Không lưu được report');
     } finally {
@@ -1113,6 +1123,7 @@ export default function ReportEditor() {
           )}
 
           {saveError && <p className="form-message error">{saveError}</p>}
+          {saved && <p className="form-message success">Đã lưu</p>}
 
           <button
             className="ghost-button"
