@@ -709,10 +709,11 @@ export default function ReportEditor() {
 
   function renderWidgetCard(w, { hideControls = false } = {}) {
     const widgetType = w.widgetType ?? 'chart';
+    const hasError = widgetType === 'chart' && Boolean(w.runResult?.error);
     return (
       <div className={widgetType === 'text' ? 'widget-card widget-card-text' : 'widget-card'} key={w.key}>
         <div className="query-result-header">
-          {widgetType === 'chart' && <h3 className="section-title">{w.runResult.name}</h3>}
+          {widgetType === 'chart' && <h3 className="section-title">{hasError ? 'Lỗi' : w.runResult.name}</h3>}
           {!hideControls && (
           <div className="widget-card-controls">
             <details className="widget-menu">
@@ -720,7 +721,7 @@ export default function ReportEditor() {
                 ⋯
               </summary>
               <div className="widget-menu-items">
-                {widgetType === 'chart' && (
+                {widgetType === 'chart' && !hasError && (
                   <select
                     className="chart-type-select"
                     value={w.chartType}
@@ -755,7 +756,7 @@ export default function ReportEditor() {
                 >
                   ↓ Chuyển xuống trang sau
                 </button>
-                {widgetType === 'chart' && (
+                {widgetType === 'chart' && !hasError && (
                   <button
                     type="button"
                     onClick={(e) => {
@@ -781,7 +782,7 @@ export default function ReportEditor() {
           </div>
           )}
         </div>
-        {widgetType === 'chart' && !hideControls && openFilterKeys.has(w.key) && (
+        {widgetType === 'chart' && !hideControls && !hasError && openFilterKeys.has(w.key) && (
           <WidgetFilterEditor
             columns={w.runResult.columns}
             rows={w.runResult.rows}
@@ -790,7 +791,11 @@ export default function ReportEditor() {
           />
         )}
         {widgetType === 'chart' ? (
-          <ChartRenderer runResult={applyFilters(w.runResult, w.filters)} chartType={w.chartType} />
+          hasError ? (
+            <p className="form-message error">Không tải được dữ liệu: {w.runResult.error}</p>
+          ) : (
+            <ChartRenderer runResult={applyFilters(w.runResult, w.filters)} chartType={w.chartType} />
+          )
         ) : (
           <TextWidgetEditor
             html={w.text}
