@@ -1,0 +1,13 @@
+# RabbitMQ cho tính năng cache biến thể query hot (docs/query-file-cache-queue-design.md).
+# Chỉ hạ tầng — server Node và worker Python vẫn chạy ngoài, mỗi bên npm/pip riêng.
+services:
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    ports:
+      - "5672:5672"    # AMQP
+      - "15672:15672"  # management UI (guest/guest)
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
