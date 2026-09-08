@@ -15,7 +15,9 @@ export const CHART_TYPE_OPTIONS = [
   { value: 'radar', label: 'Mạng nhện (Radar)' },
   { value: 'scatter', label: 'Phân tán (Scatter)' },
   { value: 'bubble', label: 'Bong bóng (Bubble)' },
+  { value: 'combo', label: 'Cột + đường (Combo)' },
   { value: 'metric', label: 'Số liệu (Metric)' },
+  { value: 'metric_delta', label: 'Số liệu + thay đổi (KPI)' },
   { value: 'table', label: 'Bảng (Table)' },
 ];
 
@@ -42,7 +44,11 @@ const CHART_RULES = {
   radar: ({ seriesCount, labelCount }) => seriesCount >= 1 && labelCount >= 3,
   scatter: ({ numberCols }) => numberCols >= 2,
   bubble: ({ numberCols }) => numberCols >= 3,
+  // combo cần >=2 series (>=1 làm bar + >=1 làm line); metric_delta cần đủ dữ
+  // liệu để so 2 kỳ: hoặc 2 cột số (current + previous) hoặc 1 cột số >=2 dòng.
+  combo: ({ seriesCount, labelCount }) => seriesCount >= 2 && labelCount >= 1,
   metric: ({ rowCount }) => rowCount === 1,
+  metric_delta: ({ numberCols, rowCount }) => numberCols >= 2 || (numberCols >= 1 && rowCount >= 2),
   table: () => true,
 };
 
@@ -245,6 +251,68 @@ function buildLineChart(runResult) {
         },
       },
       scales: { y: { beginAtZero: true } },
+    },
+  };
+}
+
+// Combo: cột số đầu tiên vẽ bar (trục y trái), các cột số còn lại vẽ line
+// trên trục y phụ bên phải — để series đơn vị nhỏ (vd tăng trưởng %) không bị
+// nén dẹp khi chung trục với series lớn (vd doanh thu). Dùng chung buildSeries
+// nên chỉ hỗ trợ shape "wide"; long/tidy đã pivot thành nhiều series cùng đơn
+// vị thì mọi series từ thứ 2 vẫn chạy sang y1 (chấp nhận được — combo giả định
+// tác giả cố ý đặt cột bar trước).
+function buildComboChart(runResult) {
+  const { labels, series } = buildSeries(runResult);
+
+  const datasets = series.map((s, i) =>
+    i === 0
+      ? {
+          type: 'bar',
+          label: s.label,
+          data: s.data,
+          backgroundColor: `${colorAt(i)}cc`,
+          borderColor: colorAt(i),
+          borderWidth: 1,
+          borderRadius: 4,
+          yAxisID: 'y',
+        }
+      : {
+          type: 'line',
+          label: s.label,
+          data: s.data,
+          borderColor: colorAt(i),
+          backgroundColor: `${colorAt(i)}33`,
+          tension: 0.3,
+          fill: false,
+          yAxisID: 'y1',
+        }
+  );
+
+  return {
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      layout: { padding: { top: 24 } },
+      plugins: {
+        legend: { display: true },
+        datalabels: {
+          align: 'top',
+          color: (ctx) => colorAt(ctx.datasetIndex),
+          font: { size: 10 },
+          formatter: formatDataLabel,
+        },
+      },
+      scales: {
+        y: { beginAtZero: true, position: 'left' },
+        y1: {
+          beginAtZero: true,
+          position: 'right',
+          // Không vẽ lưới của trục phụ đè lên vùng chart -> tránh rối mắt khi
+          // 2 trục có vạch chia không trùng nhau.
+          grid: { drawOnChartArea: false },
+        },
+      },
     },
   };
 }
@@ -488,6 +556,41 @@ export function buildMetric(runResult) {
   };
 }
 
+// Metric + delta: 1 số to kèm % thay đổi so với kỳ trước. Tự nhận 2 dạng:
+// - >=2 cột số: cột 1 = hiện tại, cột 2 = kỳ trước (cùng 1 dòng).
+// - 1 cột số, >=2 dòng: dòng cuối = hiện tại, dòng áp cuối = kỳ trước.
+// previous = 0 (hoặc không có) -> deltaPct null, renderer ẩn dòng thay đổi.
+// ponytail: xanh=tăng/đỏ=giảm cứng trong renderer — với chi phí/churn thì
+// ngược, thêm cờ "giảm là tốt" ở chartConfig nếu có nhu cầu.
+export function buildMetricDelta(runResult) {
+  const { columns, rows } = runResult;
+  const numberCols = columns.filter((c) => c.type === 'number');
+  if (rows.length === 0 || numberCols.length === 0) {
+    return { label: (numberCols[0] || columns[0])?.label, value: null, previous: null, deltaPct: null };
+  }
+
+  let value;
+  let previous;
+  let label;
+  if (numberCols.length >= 2) {
+    value = Number(rows[0][numberCols[0].key]);
+    previous = Number(rows[0][numberCols[1].key]);
+    label = numberCols[0].label;
+  } else {
+    const col = numberCols[0];
+    value = Number(rows[rows.length - 1][col.key]);
+    previous = rows.length >= 2 ? Number(rows[rows.length - 2][col.key]) : null;
+    label = col.label;
+  }
+
+  const deltaPct =
+    previous !== null && previous !== 0 && Number.isFinite(previous) && Number.isFinite(value)
+      ? ((value - previous) / Math.abs(previous)) * 100
+      : null;
+
+  return { label, value, previous, deltaPct };
+}
+
 // Trả về { data, options } cho Chart.js, hoặc null nếu chartType không phải
 // dạng chart.js (metric / table tự render riêng).
 export function buildChartConfig(runResult, chartType) {
@@ -502,6 +605,8 @@ export function buildChartConfig(runResult, chartType) {
       return buildLineChart(runResult);
     case 'area':
       return buildAreaChart(runResult);
+    case 'combo':
+      return buildComboChart(runResult);
     case 'pie':
     case 'doughnut':
       return buildSliceChart(runResult);

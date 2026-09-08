@@ -62,6 +62,7 @@ model Report {
   name        String         @db.VarChar(255)
   description String?
   filterValues Json          @default("{}") @map("filter_values")
+  filterOptions Json         @default("{}") @map("filter_options")
   createdAt   DateTime       @default(now()) @map("created_at")
   updatedAt   DateTime       @default(now()) @map("updated_at")
   widgets     ReportWidget[]

@@ -15,7 +15,9 @@ const ALLOWED_CHART_TYPES = [
   'radar',
   'scatter',
   'bubble',
+  'combo',
   'metric',
+  'metric_delta',
   'table',
 ];
 
@@ -57,13 +59,47 @@ function validateWidgets(widgets) {
   });
 }
 
-function validatePayload({ name, description, widgets }) {
+// filter_options: ánh xạ phẳng { paramName: ["opt1","opt2",...] } — list giá trị
+// chọn sẵn cho dropdown global filter, do report author tự thêm/xoá. Cấu hình
+// authoring (đổi khi "Lưu report"), khác filter_values (đổi mỗi lần "Áp dụng").
+// Mọi option ép về chuỗi cho khớp ràng buộc "giá trị filter luôn là text".
+const MAX_FILTER_OPTIONS = 200;
+
+function validateFilterOptions(filterOptions) {
+  if (filterOptions === undefined) return {};
+  if (typeof filterOptions !== 'object' || filterOptions === null || Array.isArray(filterOptions)) {
+    throw new AppError('filterOptions phải là 1 object', 400);
+  }
+  const clean = {};
+  for (const [paramName, list] of Object.entries(filterOptions)) {
+    if (paramName.trim().length === 0) continue;
+    if (!Array.isArray(list)) {
+      throw new AppError('filterOptions[paramName] phải là 1 mảng', 400);
+    }
+    const seen = new Set();
+    const options = [];
+    for (const raw of list) {
+      const value = String(raw).trim();
+      if (value.length === 0 || seen.has(value)) continue;
+      seen.add(value);
+      options.push(value);
+    }
+    if (options.length > MAX_FILTER_OPTIONS) {
+      throw new AppError(`filterOptions[${paramName}] vượt quá ${MAX_FILTER_OPTIONS} giá trị`, 400);
+    }
+    if (options.length > 0) clean[paramName] = options;
+  }
+  return clean;
+}
+
+function validatePayload({ name, description, widgets, filterOptions }) {
   if (typeof name !== 'string' || name.trim().length === 0) {
     throw new AppError('name không được để trống', 400);
   }
   return {
     name: name.trim(),
     description: typeof description === 'string' ? description : null,
+    filterOptions: validateFilterOptions(filterOptions),
     widgets: validateWidgets(widgets),
   };
 }
@@ -132,3 +168,23 @@ module.exports = {
   updateFilterValues,
   remove,
 };
+
+// Tự-kiểm nhanh (node src/services/reportService.js) — theo convention "không có
+// test framework" của repo. Chỉ soi validateFilterOptions vì đó là phần logic mới.
+if (require.main === module) {
+  const assert = require('node:assert/strict');
+  assert.deepEqual(validateFilterOptions(undefined), {});
+  assert.deepEqual(validateFilterOptions({}), {});
+  // trim + bỏ trùng + bỏ rỗng + bỏ param có list rỗng + ép chuỗi
+  assert.deepEqual(
+    validateFilterOptions({ region: [' Bắc ', 'Bắc', '', 'Nam'], year: [2024, 2025], empty: ['  '] }),
+    { region: ['Bắc', 'Nam'], year: ['2024', '2025'] }
+  );
+  assert.throws(() => validateFilterOptions([]), /object/);
+  assert.throws(() => validateFilterOptions({ region: 'Bắc' }), /mảng/);
+  assert.throws(
+    () => validateFilterOptions({ region: Array.from({ length: 201 }, (_, i) => `v${i}`) }),
+    /vượt quá/
+  );
+  console.log('reportService.js: all assertions passed');
+}

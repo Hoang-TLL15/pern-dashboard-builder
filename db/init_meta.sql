@@ -39,10 +39,13 @@ CREATE TABLE reports (
     name VARCHAR(255) NOT NULL,
     description TEXT,
     filter_values JSONB NOT NULL DEFAULT '{}', -- giá trị global filter áp dụng lần gần nhất, không phải định nghĩa (paramName tự dò từ SQL, xem sqlParams.js)
+    filter_options JSONB NOT NULL DEFAULT '{}', -- ánh xạ { paramName: ["opt1","opt2",...] } — filter nào có list thì render dropdown chọn sẵn thay vì ô text; list do report author tự thêm/xoá (xem docs/parameter-filter.md)
     created_at TIMESTAMP NOT NULL DEFAULT now(),
     updated_at TIMESTAMP NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_reports_user_id ON reports(user_id);
+-- DB đã tạo từ trước: chạy tay dòng dưới để thêm cột mới
+-- ALTER TABLE reports ADD COLUMN IF NOT EXISTS filter_options JSONB NOT NULL DEFAULT '{}';
 
 CREATE TABLE report_widgets (
     id SERIAL PRIMARY KEY,
@@ -216,5 +219,55 @@ INSERT INTO query_configs (name, description, db_connection_id, query, suggested
     1,
     'SELECT o.order_id, c.first_name || '' '' || c.last_name AS customer_name, e.full_name AS employee_name, o.order_date, o.status FROM orders o JOIN customers c ON c.customer_id = o.customer_id JOIN employees e ON e.employee_id = o.employee_id WHERE EXTRACT(YEAR FROM o.order_date) = :year ORDER BY o.order_date',
     'table'
+);
+
+-- query_configs cho 2 loại chart mới (xem client/src/charts/chartAdapter.js):
+-- - combo: shape "wide" 1 cột nhãn + >=2 cột số; cột số đầu -> bar (trục y trái),
+--   các cột sau -> line (trục y phụ bên phải).
+-- - metric_delta: 1 số to + % thay đổi. Tự nhận 2 dạng: (a) >=2 cột số 1 dòng
+--   (cột 1 = hiện tại, cột 2 = kỳ trước); (b) 1 cột số nhiều dòng (dòng cuối vs
+--   dòng áp cuối). Dạng (a) đặt alias tiếng Việt để thẻ KPI hiển thị đẹp.
+INSERT INTO query_configs (name, description, db_connection_id, query, suggested_chart_type) VALUES
+(
+    'Doanh thu và số đơn theo tháng',
+    'Combo: month (nhãn) + revenue (bar, trục trái) + order_count (line, trục phải) — 2 đơn vị chênh nhau nên tách trục',
+    1,
+    'SELECT to_char(o.order_date, ''YYYY-MM'') AS month, SUM(oi.quantity * oi.unit_price) AS revenue, COUNT(DISTINCT o.order_id) AS order_count FROM orders o JOIN order_items oi ON oi.order_id = o.order_id GROUP BY month ORDER BY month',
+    'combo'
+),
+(
+    'Doanh thu và tăng trưởng theo tháng',
+    'Combo: revenue (bar) + growth_pct (line, trục phải) tính bằng LAG so với tháng liền trước',
+    1,
+    'WITH monthly AS (SELECT to_char(o.order_date, ''YYYY-MM'') AS month, SUM(oi.quantity * oi.unit_price) AS revenue FROM orders o JOIN order_items oi ON oi.order_id = o.order_id GROUP BY month) SELECT month, revenue, ROUND((revenue - LAG(revenue) OVER (ORDER BY month)) / NULLIF(LAG(revenue) OVER (ORDER BY month), 0) * 100, 1) AS growth_pct FROM monthly ORDER BY month',
+    'combo'
+),
+(
+    'Doanh thu và giá trị dòng đơn trung bình theo danh mục',
+    'Combo: revenue (bar) + avg_line_value (line, trục phải) — cùng đơn vị tiền nhưng chênh độ lớn nên tách trục cho dễ đọc',
+    1,
+    'SELECT p.category, SUM(oi.quantity * oi.unit_price) AS revenue, ROUND(AVG(oi.quantity * oi.unit_price), 2) AS avg_line_value FROM order_items oi JOIN products p ON p.product_id = oi.product_id GROUP BY p.category ORDER BY revenue DESC',
+    'combo'
+),
+(
+    'Số đơn theo tháng (KPI có so sánh kỳ trước)',
+    'Metric+delta dạng chuỗi thời gian: month (nhãn) + order_count (số) nhiều dòng — thẻ KPI lấy dòng cuối làm hiện tại, dòng áp cuối làm kỳ trước',
+    1,
+    'SELECT to_char(order_date, ''YYYY-MM'') AS month, COUNT(*) AS order_count FROM orders GROUP BY month ORDER BY month',
+    'metric_delta'
+),
+(
+    'Doanh thu tháng mới nhất so với tháng liền trước',
+    'Metric+delta dạng 2 cột số trên 1 dòng: cột 1 = tháng mới nhất có dữ liệu, cột 2 = tháng liền trước',
+    1,
+    'WITH monthly AS (SELECT date_trunc(''month'', o.order_date) AS m, SUM(oi.quantity * oi.unit_price) AS revenue FROM orders o JOIN order_items oi ON oi.order_id = o.order_id GROUP BY m), ranked AS (SELECT revenue, ROW_NUMBER() OVER (ORDER BY m DESC) AS rn FROM monthly) SELECT MAX(CASE WHEN rn = 1 THEN revenue END) AS "Doanh thu tháng này", MAX(CASE WHEN rn = 2 THEN revenue END) AS "Tháng trước" FROM ranked',
+    'metric_delta'
+),
+(
+    'Đơn hoàn tất năm nay so với năm trước',
+    'Metric+delta dạng 2 cột số: số đơn completed năm 2025 so với 2024',
+    1,
+    'SELECT SUM(CASE WHEN EXTRACT(YEAR FROM order_date) = 2025 THEN 1 ELSE 0 END) AS "Đơn hoàn tất 2025", SUM(CASE WHEN EXTRACT(YEAR FROM order_date) = 2024 THEN 1 ELSE 0 END) AS "Đơn hoàn tất 2024" FROM orders WHERE status = ''completed''',
+    'metric_delta'
 );
 

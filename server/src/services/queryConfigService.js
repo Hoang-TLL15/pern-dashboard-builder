@@ -177,14 +177,27 @@ async function run(id, filterValues = {}) {
   return executeQueryConfig(queryConfig, connection, filterValues);
 }
 
+// Chạy worker(item) cho từng item, không để 1 item lỗi làm hỏng kết quả của
+// các item còn lại — khác Promise.all (1 reject là cả mảng reject). Item lỗi
+// trả { error: message } thay vì ném ra ngoài, để runMany() không kéo sập cả
+// report chỉ vì 1 widget lỗi SQL/timeout.
+async function settleEach(items, worker) {
+  const settled = await Promise.allSettled(items.map(worker));
+  return settled.map((s) =>
+    s.status === 'fulfilled' ? s.value : { error: s.reason?.message || 'Lỗi không xác định' }
+  );
+}
+
 // Chạy nhiều query_configs cùng lúc (vd. tải hết widget của 1 report) —
 // gộp N request HTTP từ client thành 1 VÀ gộp lookup metadata trên Meta DB
 // (query_configs, db_connections) từ 2N round-trip riêng lẻ (findById theo
 // từng id) xuống còn 2 round-trip (findMany ... in ids). Việc chạy SQL thật
 // trên Data Source DB thì không gộp được — mỗi query_config có thể là SQL
 // khác nhau trên connection khác nhau — nên vẫn là N lệnh, chạy song song
-// qua Promise.all thay vì tuần tự. Không còn lọc uncachedIds trước khi load
-// metadata (cache giờ phụ thuộc giá trị filter, không biết trước khi đã load
+// qua settleEach (Promise.allSettled) thay vì tuần tự — 1 query lỗi không
+// kéo sập kết quả của các query còn lại trong cùng batch. Không còn lọc
+// uncachedIds trước khi load metadata (cache giờ phụ thuộc giá trị filter,
+// không biết trước khi đã load
 // queryConfig.query để compileParams) — Meta DB là Postgres local, rẻ hơn
 // nhiều so với Data Source DB mà cache thật sự bảo vệ.
 async function runMany(ids, filterValues = {}) {
@@ -207,17 +220,15 @@ async function runMany(ids, filterValues = {}) {
   const connections = await dbConnectionRepository.findByIdsWithCredentials(dbConnectionIds);
   const connectionsById = new Map(connections.map((c) => [c.id, c]));
 
-  const resultsById = new Map();
-  await Promise.all(
-    queryConfigs.map(async (queryConfig) => {
-      const connection = connectionsById.get(queryConfig.dbConnectionId);
-      if (!connection) {
-        throw new AppError('Không tìm thấy kết nối nguồn dữ liệu', 404);
-      }
-      resultsById.set(queryConfig.id, await executeQueryConfig(queryConfig, connection, filterValues));
-    })
-  );
+  const results = await settleEach(queryConfigs, async (queryConfig) => {
+    const connection = connectionsById.get(queryConfig.dbConnectionId);
+    if (!connection) {
+      throw new AppError('Không tìm thấy kết nối nguồn dữ liệu', 404);
+    }
+    return executeQueryConfig(queryConfig, connection, filterValues);
+  });
 
+  const resultsById = new Map(queryConfigs.map((qc, i) => [qc.id, results[i]]));
   return numericIds.map((uid) => resultsById.get(uid));
 }
 
@@ -312,3 +323,24 @@ module.exports = {
   update,
   remove,
 };
+
+if (require.main === module) {
+  const assert = require('assert');
+
+  (async () => {
+    // 1 item lỗi không được làm hỏng kết quả của các item còn lại (khác Promise.all)
+    const results = await settleEach([1, 2, 3], async (n) => {
+      if (n === 2) throw new Error('boom');
+      return n * 10;
+    });
+    assert.deepStrictEqual(results, [10, { error: 'boom' }, 30]);
+
+    // AppError cũng chỉ hỏng đúng item của nó, không lộ statusCode ra ngoài shape
+    const withAppError = await settleEach([1], async () => {
+      throw new AppError('không tìm thấy', 404);
+    });
+    assert.deepStrictEqual(withAppError, [{ error: 'không tìm thấy' }]);
+
+    console.log('queryConfigService self-check: OK');
+  })();
+}

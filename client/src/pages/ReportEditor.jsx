@@ -114,8 +114,12 @@ export default function ReportEditor() {
   const [saving, setSaving] = useState(false);
   const [openFilterKeys, setOpenFilterKeys] = useState(() => new Set());
   const [saveError, setSaveError] = useState('');
+  const [saved, setSaved] = useState(false); // hiện "Đã lưu" sau khi lưu report đang sửa (không rời trang)
   const [filterValues, setFilterValues] = useState({}); // giá trị đang chọn (không lưu DB)
   const [filterApplyError, setFilterApplyError] = useState('');
+  // { paramName: ["opt1","opt2",...] } — list lựa chọn cho dropdown global filter,
+  // do report author tự thêm/xoá. Cấu hình authoring, lưu kèm khi "Lưu report".
+  const [filterOptions, setFilterOptions] = useState({});
   // Định nghĩa global filter luôn tự suy ra từ :paramName có trong SQL của các widget
   // đang có trong report — không lưu/khai báo thủ công, không lưu vào DB.
   const filterDefs = useMemo(
@@ -220,6 +224,13 @@ export default function ReportEditor() {
     setPresentPageIndex(0);
   }
 
+  // Tự ẩn "Đã lưu" sau vài giây (không rời trang nên cần tự dọn).
+  useEffect(() => {
+    if (!saved) return undefined;
+    const timer = setTimeout(() => setSaved(false), 3000);
+    return () => clearTimeout(timer);
+  }, [saved]);
+
   useEffect(() => {
     if (!isEditing) return;
     let cancelled = false;
@@ -245,6 +256,7 @@ export default function ReportEditor() {
         setName(report.name);
         setDescription(report.description || '');
         setFilterValues(storedValues);
+        setFilterOptions(report.filterOptions || {});
         const legacy = isLegacyReport(report);
         const loaded = report.widgets.map((w, i) => {
           const widgetType = w.widgetType ?? 'chart';
@@ -461,6 +473,15 @@ export default function ReportEditor() {
     setWidgets((prev) => prev.map((w) => (w.key === key ? { ...w, filters } : w)));
   }
 
+  function handleFilterOptionsChange(paramName, list) {
+    setFilterOptions((prev) => {
+      const next = { ...prev };
+      if (list.length > 0) next[paramName] = list;
+      else delete next[paramName];
+      return next;
+    });
+  }
+
   // Chuyển widget sang trang trước/sau (direction = -1 hoặc +1). Đặt y:
   // Infinity để tự xếp xuống cuối trang đích, giống cơ chế thêm widget mới.
   // Nút "sang trang sau" ở widget cuối cùng của trang cuối cùng sẽ tạo trang
@@ -634,9 +655,11 @@ export default function ReportEditor() {
   async function handleSave() {
     setSaving(true);
     setSaveError('');
+    setSaved(false);
     const payload = {
       name,
       description,
+      filterOptions,
       widgets: widgets.map((w) => {
         const widgetType = w.widgetType ?? 'chart';
         if (widgetType === 'text') {
@@ -652,10 +675,11 @@ export default function ReportEditor() {
     try {
       if (isEditing) {
         await reportService.update(id, payload);
+        setSaved(true);
       } else {
-        await reportService.create(payload);
+        const created = await reportService.create(payload);
+        navigate(`/reports/${created.id}`); // vào thẳng trang sửa report vừa tạo, không nhảy về danh sách
       }
-      navigate('/reports');
     } catch (err) {
       setSaveError(err.response?.data?.error || 'Không lưu được report');
     } finally {
@@ -685,10 +709,11 @@ export default function ReportEditor() {
 
   function renderWidgetCard(w, { hideControls = false } = {}) {
     const widgetType = w.widgetType ?? 'chart';
+    const hasError = widgetType === 'chart' && Boolean(w.runResult?.error);
     return (
       <div className={widgetType === 'text' ? 'widget-card widget-card-text' : 'widget-card'} key={w.key}>
         <div className="query-result-header">
-          {widgetType === 'chart' && <h3 className="section-title">{w.runResult.name}</h3>}
+          {widgetType === 'chart' && <h3 className="section-title">{hasError ? 'Lỗi' : w.runResult.name}</h3>}
           {!hideControls && (
           <div className="widget-card-controls">
             <details className="widget-menu">
@@ -696,7 +721,7 @@ export default function ReportEditor() {
                 ⋯
               </summary>
               <div className="widget-menu-items">
-                {widgetType === 'chart' && (
+                {widgetType === 'chart' && !hasError && (
                   <select
                     className="chart-type-select"
                     value={w.chartType}
@@ -731,7 +756,7 @@ export default function ReportEditor() {
                 >
                   ↓ Chuyển xuống trang sau
                 </button>
-                {widgetType === 'chart' && (
+                {widgetType === 'chart' && !hasError && (
                   <button
                     type="button"
                     onClick={(e) => {
@@ -757,7 +782,7 @@ export default function ReportEditor() {
           </div>
           )}
         </div>
-        {widgetType === 'chart' && !hideControls && openFilterKeys.has(w.key) && (
+        {widgetType === 'chart' && !hideControls && !hasError && openFilterKeys.has(w.key) && (
           <WidgetFilterEditor
             columns={w.runResult.columns}
             rows={w.runResult.rows}
@@ -766,7 +791,11 @@ export default function ReportEditor() {
           />
         )}
         {widgetType === 'chart' ? (
-          <ChartRenderer runResult={applyFilters(w.runResult, w.filters)} chartType={w.chartType} />
+          hasError ? (
+            <p className="form-message error">Không tải được dữ liệu: {w.runResult.error}</p>
+          ) : (
+            <ChartRenderer runResult={applyFilters(w.runResult, w.filters)} chartType={w.chartType} />
+          )
         ) : (
           <TextWidgetEditor
             html={w.text}
@@ -1031,7 +1060,14 @@ export default function ReportEditor() {
           </div>
 
           {!isPresenting && (
-            <ReportFilterBar filterDefs={filterDefs} values={filterValues} onApply={handleApplyFilters} />
+            <ReportFilterBar
+              filterDefs={filterDefs}
+              values={filterValues}
+              onApply={handleApplyFilters}
+              filterOptions={filterOptions}
+              editable
+              onFilterOptionsChange={handleFilterOptionsChange}
+            />
           )}
           {filterApplyError && <p className="form-message error">{filterApplyError}</p>}
 
@@ -1067,7 +1103,12 @@ export default function ReportEditor() {
                 <span className="present-page-indicator">
                   Trang {presentPageIndex + 1}/{pages.length}
                 </span>
-                <ReportFilterBar filterDefs={filterDefs} values={filterValues} onApply={handleApplyFilters} />
+                <ReportFilterBar
+                  filterDefs={filterDefs}
+                  values={filterValues}
+                  onApply={handleApplyFilters}
+                  filterOptions={filterOptions}
+                />
               </div>
               <div className="present-stage">
                 <ReportPage
@@ -1087,6 +1128,7 @@ export default function ReportEditor() {
           )}
 
           {saveError && <p className="form-message error">{saveError}</p>}
+          {saved && <p className="form-message success">Đã lưu</p>}
 
           <button
             className="ghost-button"
