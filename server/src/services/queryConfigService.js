@@ -8,6 +8,8 @@ const drivers = require('../db/drivers');
 const AppError = require('../utils/AppError');
 const sqlValidator = require('./sqlValidator');
 const sqlParams = require('./sqlParams');
+const queryCacheService = require('./queryCacheService');
+const queryCacheEntryRepository = require('../repositories/queryCacheEntryRepository');
 
 // Cache kết quả chạy query theo query_configs.id + giá trị filter liên quan, TTL
 // ngắn để giảm tải DB nguồn khi nhiều request cùng chạy 1 query trong thời gian
@@ -103,7 +105,8 @@ async function runSqlOnConnection(connection, sql, values) {
 // report; chỉ phần liên quan tới paramNames thực sự xuất hiện trong SQL của chính
 // query_config này mới được lấy ra để bind — query không dùng :param nào thì không bị
 // ảnh hưởng bởi filter của report.
-async function executeQueryConfig(queryConfig, connection, filterValues = {}) {
+async function executeQueryConfig(queryConfig, connection, filterValues = {}, options = {}) {
+  const { skipCache = false } = options;
   const { sql: compiledSql, paramNames, buildValues } = sqlParams.compileParams(
     queryConfig.query,
     connection.dbType
@@ -112,27 +115,44 @@ async function executeQueryConfig(queryConfig, connection, filterValues = {}) {
   const relevantValues = {};
   for (const name of paramNames) relevantValues[name] = filterValues[name];
 
-  const cacheKey = runCacheKey(queryConfig.id, relevantValues);
-  const cached = runCache.get(cacheKey);
-  if (cached && cached.expiresAt > Date.now()) {
-    return cached.data;
-  }
-
-  const { columns, rows } = await runSqlOnConnection(
-    connection,
-    compiledSql,
-    buildValues(relevantValues)
-  );
-
-  const data = {
+  const shape = (columns, rows) => ({
     id: queryConfig.id,
     name: queryConfig.name,
     suggestedChartType: queryConfig.suggestedChartType,
     query: queryConfig.query,
     columns,
     rows,
-  };
+  });
+
+  const cacheKey = runCacheKey(queryConfig.id, relevantValues);
+
+  if (!skipCache) {
+    // Tầng 1 — runCache RAM (TTL 30s, 1 tiến trình)
+    const cached = runCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      queryCacheService.recordHit(queryConfig.id, relevantValues);
+      return cached.data;
+    }
+
+    // Tầng 2 — file JSON do worker ghi sẵn (còn hạn env.cacheFileTtlMs)
+    const fromFile = await queryCacheService.readFresh(queryConfig.id, relevantValues);
+    if (fromFile) {
+      const data = shape(fromFile.columns, fromFile.rows);
+      runCache.set(cacheKey, { data, expiresAt: Date.now() + RUN_CACHE_TTL_MS });
+      queryCacheService.recordHit(queryConfig.id, relevantValues);
+      return data;
+    }
+  }
+
+  // Tầng 3 — chạy SQL thật trên Data Source DB
+  const { columns, rows } = await runSqlOnConnection(
+    connection,
+    compiledSql,
+    buildValues(relevantValues)
+  );
+  const data = shape(columns, rows);
   runCache.set(cacheKey, { data, expiresAt: Date.now() + RUN_CACHE_TTL_MS });
+  if (!skipCache) queryCacheService.recordHit(queryConfig.id, relevantValues);
   return data;
 }
 
@@ -175,6 +195,27 @@ async function run(id, filterValues = {}) {
   }
 
   return executeQueryConfig(queryConfig, connection, filterValues);
+}
+
+// Chạy 1 query_config BỎ QUA mọi tầng cache (luôn SQL live) — dùng riêng cho
+// endpoint nội bộ /internal/refresh-cache mà worker gọi để lấy số liệu tươi
+// đem ghi ra file. Không đụng query_cache_entries.
+async function runLive(id, filterValues = {}) {
+  const numericId = toValidId(id);
+
+  const queryConfig = await queryConfigRepository.findById(numericId);
+  if (!queryConfig) {
+    throw new AppError('Không tìm thấy query config', 404);
+  }
+
+  const connection = await dbConnectionRepository.findByIdWithCredentials(
+    queryConfig.dbConnectionId
+  );
+  if (!connection) {
+    throw new AppError('Không tìm thấy kết nối nguồn dữ liệu', 404);
+  }
+
+  return executeQueryConfig(queryConfig, connection, filterValues, { skipCache: true });
 }
 
 // Chạy worker(item) cho từng item, không để 1 item lỗi làm hỏng kết quả của
@@ -287,6 +328,13 @@ async function update(id, { name, description, query, suggestedChartType }) {
     suggestedChartType,
   });
   clearRunCacheForId(numericId);
+  // Query text đổi -> mọi biến thể cache cũ có thể sai: bỏ file + dòng entry.
+  queryCacheService.deleteDir(numericId).catch((err) =>
+    console.error('[queryConfigService] xoá cache dir lỗi:', err.message)
+  );
+  queryCacheEntryRepository.deleteByQueryConfigId(numericId).catch((err) =>
+    console.error('[queryConfigService] xoá cache entries lỗi:', err.message)
+  );
   return updated;
 }
 
@@ -312,11 +360,16 @@ async function remove(id) {
 
   await queryConfigRepository.remove(numericId);
   clearRunCacheForId(numericId);
+  // Dòng entry tự xoá theo ON DELETE CASCADE; file thì phải tự dọn.
+  queryCacheService.deleteDir(numericId).catch((err) =>
+    console.error('[queryConfigService] xoá cache dir lỗi:', err.message)
+  );
 }
 
 module.exports = {
   listByDbConnectionId,
   run,
+  runLive,
   runMany,
   previewQuery,
   create,
