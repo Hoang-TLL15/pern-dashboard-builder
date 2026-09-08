@@ -29,6 +29,13 @@ app.get('/api/health', (req, res) => {
 // Error handler phải đặt sau cùng, sau mọi route
 app.use(errorHandler);
 
+// Bộ hẹn giờ làm mới cache biến thể query hot — chỉ bật khi có cờ (cần
+// RabbitMQ + worker chạy kèm). Xem docs/query-file-cache-queue-design.md.
+if (env.cacheSchedulerEnabled) {
+  require('./queue/cacheScheduler').start();
+  console.log('cacheScheduler: bật');
+}
+
 app.listen(env.port, () => {
   console.log(`Server dang chay tai http://localhost:${env.port}`);
 });
