@@ -271,3 +271,19 @@ INSERT INTO query_configs (name, description, db_connection_id, query, suggested
     'metric_delta'
 );
 
+-- =========================================================
+-- query_cache_entries — 1 dòng / biến thể (query_config + bộ giá trị filter).
+-- CHỈ chứa metadata xếp hạng để scheduler chọn "biến thể hot" đem chạy sẵn ra
+-- file; KHÔNG chứa rows (kết quả nằm ở CACHE_DIR/<id>/<params_key>.json).
+-- Xem docs/query-file-cache-queue-design.md.
+-- =========================================================
+CREATE TABLE query_cache_entries (
+    query_config_id INTEGER NOT NULL REFERENCES query_configs(id) ON DELETE CASCADE,
+    params_key   TEXT NOT NULL DEFAULT '',       -- '' = query không có :param; ngược lại = sha1(cặp [tên,giá trị] filter đã sort)
+    params       JSONB NOT NULL DEFAULT '{}',    -- giá trị bind, vd {"year":"2024"} — scheduler đọc để dựng message
+    hit_count    INTEGER NOT NULL DEFAULT 0,
+    last_read_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (query_config_id, params_key)
+);
+CREATE INDEX idx_query_cache_entries_hit_count ON query_cache_entries(hit_count DESC);
+
