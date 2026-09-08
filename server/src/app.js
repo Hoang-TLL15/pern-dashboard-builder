@@ -8,6 +8,7 @@ const authRoutes = require('./routes/auth');
 const dbConnectionRoutes = require('./routes/dbConnections');
 const queryConfigRoutes = require('./routes/queryConfigs');
 const reportRoutes = require('./routes/reports');
+const internalRoutes = require('./routes/internal');
 const errorHandler = require('./middleware/errorHandler');
 
 const app = express();
@@ -19,6 +20,7 @@ app.use('/api', authRoutes);
 app.use('/api', dbConnectionRoutes);
 app.use('/api', queryConfigRoutes);
 app.use('/api', reportRoutes);
+app.use('/api', internalRoutes);
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok' });
