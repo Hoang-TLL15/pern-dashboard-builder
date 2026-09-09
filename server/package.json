@@ -13,6 +13,7 @@
   "type": "commonjs",
   "dependencies": {
     "@prisma/client": "^6.19.3",
+    "amqplib": "^0.10.4",
     "bcrypt": "^6.0.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
@@ -20,6 +21,7 @@
     "jsonwebtoken": "^9.0.3",
     "mssql": "^12.7.0",
     "mysql2": "^3.23.3",
+    "node-cron": "^3.0.3",
     "node-sql-parser": "^5.4.0",
     "pg": "^8.23.0",
     "prisma": "^6.19.3"

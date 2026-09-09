@@ -50,9 +50,23 @@ model QueryConfig {
   suggestedChartType String         @map("suggested_chart_type") @db.VarChar(30)
   createdAt          DateTime       @default(now()) @map("created_at")
   reportWidgets      ReportWidget[]
+  cacheEntries       QueryCacheEntry[]
 
   @@index([dbConnectionId])
   @@map("query_configs")
+}
+
+model QueryCacheEntry {
+  queryConfigId Int         @map("query_config_id")
+  queryConfig   QueryConfig @relation(fields: [queryConfigId], references: [id], onDelete: Cascade)
+  paramsKey     String      @default("") @map("params_key")
+  params        Json        @default("{}")
+  hitCount      Int         @default(0) @map("hit_count")
+  lastReadAt    DateTime    @default(now()) @map("last_read_at")
+
+  @@id([queryConfigId, paramsKey])
+  @@index([hitCount])
+  @@map("query_cache_entries")
 }
 
 model Report {

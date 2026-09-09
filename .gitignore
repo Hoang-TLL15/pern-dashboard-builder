@@ -2,6 +2,11 @@ node_modules/
 dist/
 .env
 *.log
+.venv/
+__pycache__/
+*.pyc
+worker/.query-cache/
+server/.query-cache/
 .codegraph/
 .playwright-mcp/
 docs/
