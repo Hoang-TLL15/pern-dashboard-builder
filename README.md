@@ -1,148 +1,146 @@
 # PERN Dashboard Builder
 
-Ứng dụng PERN-stack (Postgres, Express, React, Node) cho phép người dùng tự tạo **báo cáo dạng dashboard nhiều trang, kéo-thả layout tự do** — tương tự cách 1 report Power BI được tổ chức: nhiều **trang (page)** cố định tỉ lệ 16:9, mỗi trang là 1 lưới (grid) mà người dùng đặt/di chuyển/resize các **visual (chart widget)** lên đó, mỗi visual gắn với 1 nguồn dữ liệu + 1 câu query.
+Ứng dụng PERN-stack (Postgres, Express, React, Node) để người dùng tự tạo **báo cáo dashboard nhiều trang, kéo-thả** kiểu Power BI: nhiều trang cố định 16:9, mỗi trang là 1 lưới đặt/di chuyển/resize các chart widget, mỗi widget gắn 1 nguồn dữ liệu + 1 query.
 
 ## Mục tiêu
 
-- **Không cho user viết SQL tự do** — chỉ được chọn trong danh sách query đã cấu hình/duyệt sẵn (`query_configs`) cho từng nguồn dữ liệu (`db_connections`). Đây là điểm khác Power BI (vốn cho tự viết M/DAX) — đổi lại BE không cần hiểu schema của bất kỳ data source nào, chỉ chạy hộ SQL đã duyệt.
-- **Report = layout đã lưu, không lưu dữ liệu.** Giống 1 file `.pbix` chỉ lưu định nghĩa visual + tham chiếu dữ liệu, report ở đây chỉ lưu: widget nào, dùng query nào, vẽ bằng chart type/cấu hình gì, đặt ở đâu trên trang nào. Mỗi lần mở lại report, hệ thống chạy lại toàn bộ query để lấy dữ liệu **mới nhất** rồi render theo layout đã lưu — dashboard "sống" chứ không phải ảnh chụp cũ.
-- **Nhiều trang trong 1 report**, mỗi trang là lưới 12 cột x 36 hàng (tỉ lệ 1920x1080/16:9), kéo-thả và resize widget tự do bằng `react-grid-layout`, widget tràn đáy trang tự động dồn sang trang kế.
-- **Xuất PDF** — mỗi trang report thành 1 trang PDF landscape (dùng cho việc chia sẻ ngoài ứng dụng, không cần đăng nhập).
+- **User không viết SQL tự do** — chỉ chọn trong danh sách query đã duyệt sẵn (`query_configs`) cho từng `db_connection`. Đổi lại backend không cần biết schema của data source.
+- **Report = layout, không lưu dữ liệu.** Chỉ lưu: widget nào, dùng query nào, chart type/cấu hình gì, đặt ở đâu. Mở lại report → chạy lại toàn bộ query để lấy số liệu mới nhất.
+- Nhiều trang / report, mỗi trang lưới 12×36 (`react-grid-layout`), widget tràn đáy tự dồn sang trang kế.
+- Xuất PDF mỗi trang thành 1 trang landscape.
 
 ## Kiến trúc
 
 ### Hai database tách biệt
 
-- **Meta DB** (`dashboard_builder_meta`) — lưu config của app: user, kết nối data source, query config, report, report widget. Toàn bộ truy cập đi qua Prisma client singleton (`server/prisma/schema.prisma`) — không có `pg` pool riêng nào cho DB này.
-- **Data Source DB** — CSDL bên ngoài mà app chạy hộ SQL đã duyệt sẵn (`query_configs.query`). Backend không biết trước schema hay ý nghĩa dữ liệu của các DB này, chỉ chạy hộ SQL đã duyệt và trả lại kết quả kèm kiểu dữ liệu từng cột.
+- **Meta DB** (`dashboard_builder_meta`) — config của app: user, db_connection, query_config, report, report_widget, query_cache_entries. Truy cập qua Prisma singleton (`server/src/config/prisma.js`), không có `pg` pool riêng.
+- **Data Source DB** — CSDL bên ngoài, backend không biết schema, chỉ chạy hộ SQL đã duyệt (`query_configs.query`) và trả `{ columns, rows }` kèm kiểu cột.
 
-### Driver layer đa loại DB (`server/src/db/`)
+### Driver layer (`server/src/db/`)
 
-`db_connections.db_type` (`postgres` | `mssql` | `mysql`) chọn driver chạy query. Mỗi driver trong `db/drivers/` implement cùng 1 interface: `createPool(connection)`, `runQuery(pool, sql)` → `{ columns, rows }`, `isTimeoutError(err)`, `resolveColumnType(typeInfo)` → 1 trong các kiểu chuẩn dùng chung (`number/date/string/boolean/json`). `db/drivers/index.js` là registry theo `db_type`; `db/dataSourcePool.js` cache 1 pool cho mỗi `db_connection_id` (evict theo idle time — sliding TTL 10 phút, quét mỗi 60s) và giao việc tạo pool cho đúng driver mà không cần biết chi tiết driver đó. Thêm 1 loại DB mới chỉ cần thêm 1 file driver và đăng ký, không phải sửa nơi khác.
+`db_connections.db_type` (`postgres` | `mssql` | `mysql`) chọn driver trong `db/drivers/`, tất cả cùng interface (`createPool`, `runQuery` → `{ columns, rows }`, `resolveColumnType` → `number/date/string/boolean/json`, `listSchema`/`listForeignKeys`). `dataSourcePool.js` cache 1 pool / `db_connection_id` (TTL 10 phút idle). Thêm loại DB = thêm 1 file driver + đăng ký.
 
 ### Backend layering (`server/src/`)
 
-Phân lớp 1 chiều, quy ước bắt buộc — không được bỏ qua lớp trung gian:
+Phân lớp 1 chiều, bắt buộc: `routes/ → controllers/ → services/ → repositories/ → Prisma | db/drivers`.
 
-```
-routes/ → controllers/ → services/ → repositories/ → Prisma (Meta DB) hoặc db/drivers (Data Source DB)
-```
-
-- **routes** — chỉ khai báo endpoint, chuyển tiếp cho controller. Mọi route trừ `/register`, `/login` đều yêu cầu `authMiddleware`.
-- **controllers** — đọc `req`, gọi đúng 1 method của service, trả `res`/`next`. Không có business logic, không đụng DB.
-- **services** — chứa nghiệp vụ (validate, hash password, phát hành token, kiểm tra quyền sở hữu). Không biết `req`/`res`.
-- **repositories** — chỉ truy cập dữ liệu, không có nghiệp vụ. Repository của Meta DB dùng Prisma; chống IDOR (truy cập chéo dữ liệu người khác) bằng cách luôn lọc/ghi kèm `userId` cùng `id` khi đụng tới report/report widget.
-- **Lỗi**: service throw `AppError(message, statusCode)`; 1 middleware `errorHandler` duy nhất (mount cuối cùng trong `app.js`) chuyển thành JSON response, log ra console nếu là lỗi không lường trước.
-- Biến môi trường được đọc tập trung ở `server/src/config/env.js` (`PORT`, `JWT_SECRET`, `DATABASE_URL`) — nơi khác không tự đọc `process.env`.
+- **routes** — khai báo endpoint. Mọi route cần `authMiddleware` trừ `/register`, `/login`, `/api/internal/*` (chặn bằng header `x-internal-secret`).
+- **controllers** — đọc `req`, gọi 1 service, trả `res`/`next`. Không logic, không DB.
+- **services** — nghiệp vụ; không biết `req`/`res`.
+- **repositories** — chỉ truy cập dữ liệu. Chống IDOR bằng cách luôn lọc/ghi kèm `userId` với report/widget.
+- Lỗi: service `throw new AppError(msg, status)` → 1 `errorHandler` chuyển thành JSON.
+- Env đọc tập trung ở `config/env.js`, nơi khác không đụng `process.env`.
 
 ### Frontend layering (`client/src/`)
 
-Cùng nguyên tắc phân lớp, mỗi thư mục 1 trách nhiệm:
+`pages/ → context/ (React state) → services/ (điều phối + localStorage) → api/ (chỉ HTTP)`.
 
-```
-pages/ → context/ (React state) → services/ (điều phối + localStorage) → api/ (chỉ gọi HTTP)
-```
-
-- **api/** — gọi HTTP thuần qua `apiClient` (axios, tự gắn `Bearer` token từ `localStorage`), trả `response.data` thô, không đụng localStorage, không có nghiệp vụ.
-- **services/** — điều phối API call, với auth thì kiêm luôn lưu phiên đăng nhập (`localStorage`).
-- **context/** — nơi duy nhất giữ React state cho auth (`useAuth()` cung cấp `user`, `login`, `register`, `logout`).
-- **pages/** — component theo route; việc điều hướng/bảo vệ route nằm ở `App.jsx` (`ProtectedRoute` chuyển về `/login` nếu chưa đăng nhập).
+- **api/** — HTTP thuần qua `apiClient` (axios, tự gắn `Bearer` từ `localStorage`).
+- **context/AuthContext** — nơi duy nhất giữ state auth (`useAuth()`); `App.jsx` `ProtectedRoute` chặn khi chưa đăng nhập.
+- **charts/chartAdapter.js** — `{ columns, rows }` → Chart.js config, 13 chart type. Đổi chart type / lọc widget tính lại ở client, không gọi API.
 
 ## Logic hoạt động
 
-### 1. Đăng nhập
-JWT-based auth (`/register`, `/login`); mọi endpoint khác yêu cầu `Bearer` token, `authMiddleware` set `req.user = { id, username }`.
+1. **Auth** — JWT (`/register`, `/login`); endpoint khác cần `Bearer`, `authMiddleware` set `req.user`.
+2. **Xem trước query** — chọn 1 `query_config` → BE chạy SQL trên pool đã cache → trả `{ columns, rows }` kèm kiểu cột.
+3. **Build report** — thêm chart rơi vào cuối trang, hết chỗ mở trang mới. Đổi chart type / lọc = tính lại ở client.
+4. **Lưu / mở lại** — Lưu: `PUT /reports/:id` xoá hết widget cũ rồi insert lại (không diff). Mở: `GET /reports/:id` (chỉ config) → `POST /query-configs/run-batch` lấy số liệu mới cho mọi widget song song.
+5. **Report-wide filter** — author viết `:param` trong SQL; editor tự dò `:param` từ widget để dựng filter. Áp giá trị → `run-batch { ids, filters }` (bind, không nối chuỗi) + `PATCH /filter-values` để lưu.
+6. **Xuất PDF** — `html2canvas` mỗi trang → `jsPDF` landscape; tiêu đề vẽ qua `<canvas>` để giữ dấu tiếng Việt.
+7. **Cache biến thể query hot (tuỳ chọn)** — xem dưới.
 
-### 2. Duyệt nguồn dữ liệu & xem trước query
-- Trang **Nguồn dữ liệu** liệt kê các `db_connections` đã cấu hình sẵn, mỗi kết nối có 1 hoặc nhiều `query_configs` (SELECT đã duyệt, kèm `suggestedChartType` gợi ý mặc định).
-- Chọn 1 query → "Xem trước" → BE lấy pool đã cache cho `db_connection_id` đó (hoặc mở mới), chạy SQL, dịch kiểu dữ liệu cột (OID Postgres → `number/date/string/boolean/json`) → trả `{ columns, rows }`.
+## Cache biến thể query hot (tuỳ chọn)
 
-### 3. Build report — trang & widget
-- 1 report gồm nhiều **trang**, mỗi trang là lưới 12x36 (`client/src/reports/pagination.js`). Thêm chart mới sẽ tự rơi vào cuối trang hiện tại; hết chỗ thì mở trang mới.
-- Mỗi widget = 1 lần chạy query (`columns/rows`) + `chartType` + vị trí/kích thước trên lưới (`layout: {page, x, y, w, h}`). Kéo-thả/resize bằng `react-grid-layout`; widget vượt đáy trang tự chuyển sang đầu trang kế.
-- Đổi loại chart hoặc thêm điều kiện lọc (`WidgetFilterEditor`) chỉ tính toán lại ở client (`chartAdapter.js`, `filterRows.js`) — **không gọi lại API**, vì `columns/rows` đã có sẵn trong bộ nhớ.
-- Widget có thể chuyển sang trang trước/sau qua menu, hoặc bị xoá.
+**Biến thể** = 1 query_config + 1 bộ giá trị filter. Biến thể hay mở được chạy sẵn theo lịch, lưu kết quả ra **file JSON**; `executeQueryConfig` đọc theo thứ tự **runCache RAM (30s) → file JSON (hạn 1 ngày) → SQL live**. Cache là phụ trợ — RabbitMQ/worker/file hỏng thì vẫn chạy live.
 
-### 4. Lưu & mở lại report
-- **Lưu**: gom toàn bộ `widgets[]` hiện có trên client (mỗi widget: `queryConfigId`, `chartType`, `chartConfig: {filters, layout}`), gửi `POST/PUT /reports`. BE chạy trong 1 transaction: xoá hết `report_widgets` cũ rồi insert lại toàn bộ — đơn giản hơn diff từng widget.
-- **Mở lại**: `GET /reports/:id` lấy danh sách widget (chỉ có config, không có `rows`) → gọi song song `GET /query-configs/:id/run` cho từng widget để lấy dữ liệu mới nhất → render lại theo `chartType`/`layout` đã lưu.
-- Report tạo trước khi có tính năng phân trang (chưa có `layout.page`) được tự động quy đổi sang trang khi mở lại (`assignLegacyPages`), không cần migrate dữ liệu.
+- `query_cache_entries` = sổ xếp hạng (`hit_count`, `last_read_at`, `params`), không chứa `rows`.
+- **Worker Python** (`worker/`, Dramatiq) nhận message từ **RabbitMQ** → gọi `POST /api/internal/refresh-cache` (Node chạy SQL) → ghi file. Worker không giữ SQL/driver/credentials.
+- **Scheduler** (`node-cron`, `CACHE_SCHEDULER_ENABLED=1`): 3h enqueue top-10 biến thể hot, 3h30 dọn biến thể idle > 14 ngày, CN 4h `hit_count /= 2`.
 
-### 5. Chart adapter
-`columns/rows` (dạng thô từ query) → Chart.js config, tuỳ theo `chartType`:
-| Nhóm chart | Cách map |
-|---|---|
-| bar, line, radar, pie, doughnut, polarArea | `labels` dùng chung theo index, mỗi field số → 1 dataset |
-| scatter | `dataset.data = rows.map(r => ({x, y}))` |
-| bubble | `dataset.data = rows.map(r => ({x, y, r}))` |
-
-Vì BE trả `{columns, rows}` thay vì format sẵn của Chart.js, đổi loại chart/trục X-Y không cần round-trip lên server.
-
-### 6. Xuất PDF
-Mỗi trang report được chụp bằng `html2canvas` (ẩn control chỉnh sửa như dropdown chart type, nút xoá/di chuyển) rồi nhúng vào 1 trang PDF landscape qua `jsPDF`; tiêu đề report được vẽ qua `<canvas>` để giữ đúng font Unicode tiếng Việt (font mặc định của jsPDF không có dấu).
+Chi tiết + sơ đồ: `docs/query-file-cache-queue-design.md`.
 
 ## Mô hình dữ liệu (Meta DB)
 
 ```
 users ──< reports ──< report_widgets >── query_configs >── db_connections
+                                              │
+                                              └──< query_cache_entries
 ```
 
-- `db_connections`: thông tin kết nối tới 1 data source (`db_type`, host/port/database/user/password — plaintext, chỉ dùng cho prototype).
-- `query_configs`: 1 câu SELECT đã duyệt sẵn, gắn với 1 `db_connection`, có `suggestedChartType`.
-- `reports`: metadata report (tên, mô tả, chủ sở hữu `user_id`).
-- `report_widgets`: 1 visual trong report — `query_config_id`, `chart_type`, `chart_config` (jsonb: filters + layout theo trang/lưới).
+- `db_connections` — kết nối 1 data source (`db_type`, host/port/db/user/password plaintext, prototype-only).
+- `query_configs` — 1 SELECT đã duyệt, gắn 1 `db_connection`, có `suggestedChartType`.
+- `reports` — metadata (tên, mô tả, `user_id`, `filter_values`/`filter_options` JSONB).
+- `report_widgets` — 1 visual: `query_config_id`, `chart_type`, `chart_config` JSONB (filters + layout).
+- `query_cache_entries` — 1 dòng / biến thể (`query_config_id` + `params_key`); sổ xếp hạng cho file cache.
 
 ## Cài đặt
 
 ### Yêu cầu
-- Node.js
-- Postgres (cho Meta DB, và cho data source mẫu)
-- (tuỳ chọn) SQL Server nếu muốn chạy data source mẫu HR
+- Node.js, Postgres (Meta DB + data source mẫu)
+- (tuỳ chọn) SQL Server cho data source mẫu HR
+- (tuỳ chọn) Docker + Python cho cache biến thể query
 
 ### 1. Database
 
-Chạy tay các script SQL trong `db/` trên server tương ứng:
-
-- `db/init_meta.sql` — schema Meta DB, **bắt buộc**.
-- `db/init_datasource.sql` — data source mẫu Postgres (AdventureWorks-lite shop data), tuỳ chọn.
-- `db/init_datasource_mssql_hr.sql` — data source mẫu SQL Server (HR data), tuỳ chọn.
+Chạy tay script SQL trong `db/`:
+- `db/init_meta.sql` — schema Meta DB, **bắt buộc**
+- `db/init_datasource.sql` (Postgres) / `db/init_datasource_mssql_hr.sql` (SQL Server) — data source mẫu, tuỳ chọn
 
 ### 2. Server
 
 ```bash
-cd server
-npm install
+cd server && npm install
 ```
 
-Tạo file `.env`:
-
+`.env`:
 ```
 PORT=4000
-JWT_SECRET=<chuỗi bí mật của bạn>
-DATABASE_URL=postgresql://<user>:<password>@<host>:<port>/dashboard_builder_meta
+JWT_SECRET=<chuỗi bí mật>
+DATABASE_URL=postgresql://<user>:<pass>@<host>:<port>/dashboard_builder_meta
+
+# Cache (tuỳ chọn — xem bước 4)
+RABBITMQ_URL=amqp://guest:guest@localhost:5672
+INTERNAL_API_SECRET=<bí mật dùng chung với worker>
+CACHE_DIR=<đường dẫn tuyệt đối>
+CACHE_SCHEDULER_ENABLED=0
 ```
 
-Chạy:
-
 ```bash
-npm run dev    # nodemon, auto-reload
-npm start      # chạy thường
+npm run dev    # nodemon
+npm start
 ```
 
 ### 3. Client
 
 ```bash
-cd client
-npm install
-npm run dev      # Vite dev server
-npm run build    # build production
-npm run lint     # ESLint
+cd client && npm install
+npm run dev      # Vite
+npm run build
+npm run lint
 ```
 
-Client gọi API tại `http://localhost:4000/api` (xem `client/src/api/client.js`).
+API tại `http://localhost:4000/api`.
+
+### 4. Cache biến thể query (tuỳ chọn)
+
+Bỏ qua thì app vẫn chạy đầy đủ, chỉ không có file cache.
+
+```bash
+docker compose up -d rabbitmq          # UI: http://localhost:15672 (guest/guest)
+
+cd worker
+python -m venv .venv && .venv\Scripts\activate   # hoặc: source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env                   # điền INTERNAL_API_SECRET + CACHE_DIR khớp server/.env
+dramatiq actors
+
+# server/.env: CACHE_SCHEDULER_ENABLED=1, rồi npm run dev
+```
+
+Đẩy thử: `node server/scripts/enqueueRefresh.js <queryConfigId>`. Xem `worker/README.md`.
 
 ## Ghi chú
 
 - Không có script test/lint cho server.
-- `db_connections` lưu credential data source dạng plaintext — chỉ dùng cho môi trường prototype (production nên dùng Vault/KMS).
-- Comment code backend và message lỗi API viết bằng tiếng Việt.
+- `db_connections` lưu credential plaintext — prototype-only (production: Vault/KMS).
+- Comment backend + message lỗi API viết tiếng Việt.
