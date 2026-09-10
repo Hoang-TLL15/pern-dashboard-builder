@@ -20,19 +20,24 @@ async function upsertHit(queryConfigId, paramsKey, params, hitCount = 1, duratio
   });
 }
 
-// Scheduler: N biến thể "đáng chạy sẵn nhất" còn được đọc trong cửa sổ gần đây
-// — xếp hạng theo hot × đắt (hit_count * duration_ms) thay vì chỉ hot, để ưu
-// tiên biến thể vừa nhiều lượt xem vừa tốn thời gian chạy. duration_ms chưa đo
-// được (chưa từng chạy live) coi như 1 -> vẫn xếp theo hit_count, dưới mọi biến
-// thể đã đo. $queryRaw vì Prisma không orderBy được biểu thức số học.
+// Scheduler: N biến thể hot nhất (hit_count cao nhất) còn được đọc trong cửa sổ
+// gần đây. duration_ms KHÔNG dùng để xếp hạng — chỉ để LỌC bỏ biến thể mà cache
+// vô nghĩa: query chạy live < DURATION_FLOOR_MS thì đọc file cache cũng mất
+// chừng đó, chưa kể mỗi đêm tốn nguyên vòng worker refresh cho nó. Giữ mục tiêu
+// "cache query HOT" — query đắt-mà-hiếm không đáng pre-warm theo lịch (2 lượt/
+// tuần không bù nổi 1 lần refresh/đêm). duration_ms = null (chưa từng chạy live,
+// vd worker pre-warm trước lần đọc đầu) -> giữ lại, an toàn hơn loại nhầm.
+const DURATION_FLOOR_MS = 50;
+
 async function findTopN(limit, readSince) {
-  return prisma.$queryRaw`
-    SELECT query_config_id AS "queryConfigId", params_key AS "paramsKey", params
-    FROM query_cache_entries
-    WHERE last_read_at >= ${readSince}
-    ORDER BY hit_count * COALESCE(duration_ms, 1) DESC
-    LIMIT ${limit}
-  `;
+  return prisma.queryCacheEntry.findMany({
+    where: {
+      lastReadAt: { gte: readSince },
+      OR: [{ durationMs: null }, { durationMs: { gte: DURATION_FLOOR_MS } }],
+    },
+    orderBy: { hitCount: 'desc' },
+    take: limit,
+  });
 }
 
 // Decay hàng tuần: chia đôi mọi hit_count (chia số nguyên) để biến thể từng
