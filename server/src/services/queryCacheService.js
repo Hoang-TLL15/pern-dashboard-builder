@@ -28,27 +28,79 @@ function cacheFilePath(queryConfigId, key) {
 // hạn env.cacheFileTtlMs; ngược lại undefined (caller chạy SQL live).
 async function readFresh(queryConfigId, relevantValues) {
   const file = cacheFilePath(queryConfigId, paramsKey(relevantValues));
-  let raw;
+  let parsed;
   try {
-    raw = await fsp.readFile(file, 'utf8');
+    parsed = JSON.parse(await fsp.readFile(file, 'utf8'));
   } catch (err) {
     if (err.code === 'ENOENT') return undefined;
+    // File rác (worker crash giữa lúc ghi, đĩa đầy...) -> coi như cache miss,
+    // caller chạy SQL live. Cache là phụ trợ, không được kéo sập widget.
+    if (err instanceof SyntaxError) return undefined;
     throw err;
   }
-  const parsed = JSON.parse(raw);
-  if (Date.now() - new Date(parsed.computed_at).getTime() > env.cacheFileTtlMs) {
+  const computedAt = new Date(parsed.computed_at).getTime();
+  if (Number.isNaN(computedAt) || Date.now() - computedAt > env.cacheFileTtlMs) {
     return undefined;
   }
   return { columns: parsed.columns, rows: parsed.rows };
 }
 
-// Fire-and-forget sau mỗi lần trả kết quả 1 biến thể — đánh dấu nó được dùng để
-// scheduler xếp hạng. Nuốt lỗi: sổ sách cache hỏng không được ảnh hưởng report.
-function recordHit(queryConfigId, relevantValues) {
-  queryCacheEntryRepository
-    .upsertHit(queryConfigId, paramsKey(relevantValues), stripUndefined(relevantValues))
-    .catch((err) => console.error('[queryCacheService] recordHit lỗi:', err.message));
+// Gọi sau mỗi lần trả kết quả 1 biến thể — đánh dấu nó được dùng để scheduler
+// xếp hạng. KHÔNG upsert Meta DB ngay: 1 report nhiều widget mở nhiều lần =
+// hàng trăm write/phút cho dữ liệu chỉ dùng để xếp hạng. Gộp vào RAM, flush
+// định kỳ (flushHits). Mất tối đa 1 chu kỳ flush khi tiến trình chết — chấp
+// nhận được, đây là số liệu xếp hạng không phải dữ liệu nghiệp vụ.
+// durationMs: chỉ lượt chạy SQL live (tier-3) truyền vào; cache hit gọi không
+// kèm -> giữ nguyên duration_ms cũ trong DB.
+const FLUSH_INTERVAL_MS = 30_000;
+const pendingHits = new Map(); // key `${id}::${paramsKey}` -> { queryConfigId, paramsKey, params, hits, durationMs }
+
+function recordHit(queryConfigId, relevantValues, durationMs) {
+  const key = paramsKey(relevantValues);
+  const params = stripUndefined(relevantValues);
+  const existing = pendingHits.get(`${queryConfigId}::${key}`);
+  if (existing) {
+    existing.hits += 1;
+    existing.params = params;
+    if (durationMs !== undefined) existing.durationMs = durationMs;
+  } else {
+    pendingHits.set(`${queryConfigId}::${key}`, {
+      queryConfigId,
+      paramsKey: key,
+      params,
+      hits: 1,
+      durationMs,
+    });
+  }
 }
+
+// Ghi toàn bộ hit đã gộp xuống Meta DB. Gọi định kỳ qua timer; cũng nên gọi 1
+// lần lúc graceful shutdown để không mất chu kỳ cuối. Nuốt lỗi từng entry: sổ
+// sách cache hỏng không được ảnh hưởng report.
+// ponytail: loop upsert từng entry, không gộp 1 câu INSERT ... ON CONFLICT nhiều
+// VALUES. Số biến thể/chu kỳ nhỏ; việc gộp đã bỏ được phần write-per-read. Nâng
+// cấp nếu 1 flush đụng hàng trăm biến thể.
+async function flushHits() {
+  if (pendingHits.size === 0) return;
+  const batch = [...pendingHits.values()];
+  pendingHits.clear();
+  for (const e of batch) {
+    try {
+      await queryCacheEntryRepository.upsertHit(
+        e.queryConfigId,
+        e.paramsKey,
+        e.params,
+        e.hits,
+        e.durationMs
+      );
+    } catch (err) {
+      console.error('[queryCacheService] flushHits lỗi:', err.message);
+    }
+  }
+}
+
+const flushTimer = setInterval(() => flushHits(), FLUSH_INTERVAL_MS);
+flushTimer.unref();
 
 function stripUndefined(obj) {
   const out = {};
@@ -68,7 +120,16 @@ async function deleteDir(queryConfigId) {
   await fsp.rm(path.join(env.cacheDir, String(queryConfigId)), { recursive: true, force: true });
 }
 
-module.exports = { paramsKey, cacheFilePath, readFresh, recordHit, deleteFile, deleteDir };
+module.exports = {
+  paramsKey,
+  cacheFilePath,
+  readFresh,
+  recordHit,
+  flushHits,
+  pendingHits,
+  deleteFile,
+  deleteDir,
+};
 
 if (require.main === module) {
   const assert = require('assert');
@@ -112,6 +173,30 @@ if (require.main === module) {
       computed_at: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString(),
     }));
     assert.strictEqual(await svc.readFresh(1, {}), undefined);
+
+    // file JSON hỏng (worker crash giữa lúc ghi) -> undefined, KHÔNG ném
+    fs.writeFileSync(fresh, '{"columns":[],"rows":[');
+    assert.strictEqual(await svc.readFresh(1, {}), undefined);
+
+    // computed_at hỏng -> undefined (trước đây NaN lọt qua check TTL)
+    fs.writeFileSync(fresh, JSON.stringify({ columns: [], rows: [], computed_at: 'xxx' }));
+    assert.strictEqual(await svc.readFresh(1, {}), undefined);
+
+    // recordHit: gộp cùng biến thể vào 1 entry, cộng dồn hits, duration
+    // last-write-wins và không bị xoá bởi cache hit không kèm duration.
+    svc.pendingHits.clear();
+    svc.recordHit(7, { year: '2024' });
+    svc.recordHit(7, { year: '2024' }, 150);
+    svc.recordHit(7, { year: '2024' }); // cache hit sau đó -> giữ nguyên 150
+    svc.recordHit(9, {});
+    assert.strictEqual(svc.pendingHits.size, 2, '2 biến thể riêng -> 2 entry');
+    const e7 = [...svc.pendingHits.values()].find((x) => x.queryConfigId === 7);
+    assert.strictEqual(e7.hits, 3);
+    assert.strictEqual(e7.durationMs, 150);
+    svc.pendingHits.clear();
+
+    // flushHits rỗng -> no-op, không ném
+    await svc.flushHits();
 
     console.log('queryCacheService self-check: OK');
   })();

@@ -62,6 +62,7 @@ model QueryCacheEntry {
   paramsKey     String      @default("") @map("params_key")
   params        Json        @default("{}")
   hitCount      Int         @default(0) @map("hit_count")
+  durationMs    Int?        @map("duration_ms") // ms lần chạy SQL live gần nhất; NULL nếu chưa đo. Scheduler xếp hạng theo hit_count * duration_ms
   lastReadAt    DateTime    @default(now()) @map("last_read_at")
 
   @@id([queryConfigId, paramsKey])

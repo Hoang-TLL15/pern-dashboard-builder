@@ -144,15 +144,18 @@ async function executeQueryConfig(queryConfig, connection, filterValues = {}, op
     }
   }
 
-  // Tầng 3 — chạy SQL thật trên Data Source DB
+  // Tầng 3 — chạy SQL thật trên Data Source DB. Đo thời gian chạy để scheduler
+  // xếp hạng biến thể theo "hot × đắt" (xem queryCacheEntryRepository.findTopN).
+  const startedAt = Date.now();
   const { columns, rows } = await runSqlOnConnection(
     connection,
     compiledSql,
     buildValues(relevantValues)
   );
+  const durationMs = Date.now() - startedAt;
   const data = shape(columns, rows);
   runCache.set(cacheKey, { data, expiresAt: Date.now() + RUN_CACHE_TTL_MS });
-  if (!skipCache) queryCacheService.recordHit(queryConfig.id, relevantValues);
+  if (!skipCache) queryCacheService.recordHit(queryConfig.id, relevantValues, durationMs);
   return data;
 }
 

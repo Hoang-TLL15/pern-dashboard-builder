@@ -3,23 +3,36 @@
 // logic, không req/res. Xem docs/query-file-cache-queue-design.md.
 const prisma = require('../config/prisma');
 
-// Gọi fire-and-forget sau mỗi lần đọc 1 biến thể: +1 hit_count, làm mới
-// last_read_at, ghi đè params (giá trị filter mới nhất đã bind).
-async function upsertHit(queryConfigId, paramsKey, params) {
+// queryCacheService.flushHits() gọi: cộng `hitCount` hit đã gộp trong chu kỳ,
+// làm mới last_read_at, ghi đè params (giá trị filter mới nhất đã bind). Cập
+// nhật duration_ms chỉ khi chu kỳ có ít nhất 1 lượt chạy SQL live (cache hit
+// truyền durationMs === undefined -> giữ nguyên giá trị cũ).
+async function upsertHit(queryConfigId, paramsKey, params, hitCount = 1, durationMs) {
   await prisma.queryCacheEntry.upsert({
     where: { queryConfigId_paramsKey: { queryConfigId, paramsKey } },
-    create: { queryConfigId, paramsKey, params, hitCount: 1 },
-    update: { hitCount: { increment: 1 }, lastReadAt: new Date(), params },
+    create: { queryConfigId, paramsKey, params, hitCount, durationMs: durationMs ?? null },
+    update: {
+      hitCount: { increment: hitCount },
+      lastReadAt: new Date(),
+      params,
+      ...(durationMs === undefined ? {} : { durationMs }),
+    },
   });
 }
 
-// Scheduler: N biến thể hit_count cao nhất còn được đọc trong cửa sổ gần đây.
+// Scheduler: N biến thể "đáng chạy sẵn nhất" còn được đọc trong cửa sổ gần đây
+// — xếp hạng theo hot × đắt (hit_count * duration_ms) thay vì chỉ hot, để ưu
+// tiên biến thể vừa nhiều lượt xem vừa tốn thời gian chạy. duration_ms chưa đo
+// được (chưa từng chạy live) coi như 1 -> vẫn xếp theo hit_count, dưới mọi biến
+// thể đã đo. $queryRaw vì Prisma không orderBy được biểu thức số học.
 async function findTopN(limit, readSince) {
-  return prisma.queryCacheEntry.findMany({
-    where: { lastReadAt: { gte: readSince } },
-    orderBy: { hitCount: 'desc' },
-    take: limit,
-  });
+  return prisma.$queryRaw`
+    SELECT query_config_id AS "queryConfigId", params_key AS "paramsKey", params
+    FROM query_cache_entries
+    WHERE last_read_at >= ${readSince}
+    ORDER BY hit_count * COALESCE(duration_ms, 1) DESC
+    LIMIT ${limit}
+  `;
 }
 
 // Decay hàng tuần: chia đôi mọi hit_count (chia số nguyên) để biến thể từng
