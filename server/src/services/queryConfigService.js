@@ -155,7 +155,13 @@ async function executeQueryConfig(queryConfig, connection, filterValues = {}, op
   const durationMs = Date.now() - startedAt;
   const data = shape(columns, rows);
   runCache.set(cacheKey, { data, expiresAt: Date.now() + RUN_CACHE_TTL_MS });
-  if (!skipCache) queryCacheService.recordHit(queryConfig.id, relevantValues, durationMs);
+  if (skipCache) {
+    // Worker làm mới cache: cập nhật duration_ms để findTopN lọc theo số liệu
+    // tươi, nhưng KHÔNG cộng hit_count (không phải lượt người dùng xem).
+    queryCacheService.recordDuration(queryConfig.id, relevantValues, durationMs);
+  } else {
+    queryCacheService.recordHit(queryConfig.id, relevantValues, durationMs);
+  }
   return data;
 }
 

@@ -7,13 +7,16 @@ const prisma = require('../config/prisma');
 // làm mới last_read_at, ghi đè params (giá trị filter mới nhất đã bind). Cập
 // nhật duration_ms chỉ khi chu kỳ có ít nhất 1 lượt chạy SQL live (cache hit
 // truyền durationMs === undefined -> giữ nguyên giá trị cũ).
+// hitCount === 0 (chỉ có lượt worker refresh, xem recordDuration): cập nhật
+// duration_ms nhưng KHÔNG đụng last_read_at — nếu không, biến thể không còn ai
+// xem vẫn bị worker "hồi sinh" mỗi đêm và thoát khỏi cleanup mãi mãi.
 async function upsertHit(queryConfigId, paramsKey, params, hitCount = 1, durationMs) {
   await prisma.queryCacheEntry.upsert({
     where: { queryConfigId_paramsKey: { queryConfigId, paramsKey } },
     create: { queryConfigId, paramsKey, params, hitCount, durationMs: durationMs ?? null },
     update: {
       hitCount: { increment: hitCount },
-      lastReadAt: new Date(),
+      ...(hitCount > 0 ? { lastReadAt: new Date() } : {}),
       params,
       ...(durationMs === undefined ? {} : { durationMs }),
     },

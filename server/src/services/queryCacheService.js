@@ -51,7 +51,9 @@ async function readFresh(queryConfigId, relevantValues) {
 // định kỳ (flushHits). Mất tối đa 1 chu kỳ flush khi tiến trình chết — chấp
 // nhận được, đây là số liệu xếp hạng không phải dữ liệu nghiệp vụ.
 // durationMs: chỉ lượt chạy SQL live (tier-3) truyền vào; cache hit gọi không
-// kèm -> giữ nguyên duration_ms cũ trong DB.
+// kèm -> giữ nguyên duration_ms cũ trong DB. Lượt worker làm mới cache (skipCache)
+// đo được durationMs nhưng KHÔNG phải lượt người dùng -> gọi recordDuration để
+// cập nhật duration_ms mà không cộng hit_count.
 const FLUSH_INTERVAL_MS = 30_000;
 const pendingHits = new Map(); // key `${id}::${paramsKey}` -> { queryConfigId, paramsKey, params, hits, durationMs }
 
@@ -69,6 +71,28 @@ function recordHit(queryConfigId, relevantValues, durationMs) {
       paramsKey: key,
       params,
       hits: 1,
+      durationMs,
+    });
+  }
+}
+
+// Worker làm mới cache (skipCache) vừa đo xong thời gian chạy SQL live — ghi lại
+// duration_ms cho biến thể đó mà KHÔNG cộng hit_count (lượt worker không phải
+// lượt người dùng xem). Gộp chung pendingHits: nếu chu kỳ này đã có lượt người
+// dùng cho cùng biến thể thì chỉ cập nhật durationMs, giữ nguyên hits.
+function recordDuration(queryConfigId, relevantValues, durationMs) {
+  if (durationMs === undefined) return;
+  const key = paramsKey(relevantValues);
+  const mapKey = `${queryConfigId}::${key}`;
+  const existing = pendingHits.get(mapKey);
+  if (existing) {
+    existing.durationMs = durationMs;
+  } else {
+    pendingHits.set(mapKey, {
+      queryConfigId,
+      paramsKey: key,
+      params: stripUndefined(relevantValues),
+      hits: 0,
       durationMs,
     });
   }
@@ -125,6 +149,7 @@ module.exports = {
   cacheFilePath,
   readFresh,
   recordHit,
+  recordDuration,
   flushHits,
   pendingHits,
   deleteFile,
@@ -193,6 +218,19 @@ if (require.main === module) {
     const e7 = [...svc.pendingHits.values()].find((x) => x.queryConfigId === 7);
     assert.strictEqual(e7.hits, 3);
     assert.strictEqual(e7.durationMs, 150);
+    svc.pendingHits.clear();
+
+    // recordDuration: ghi durationMs, KHÔNG cộng hits (lượt worker refresh)
+    svc.recordDuration(7, { year: '2024' }, 900);
+    let d7 = [...svc.pendingHits.values()][0];
+    assert.strictEqual(d7.hits, 0, 'recordDuration không cộng hits');
+    assert.strictEqual(d7.durationMs, 900);
+    svc.recordHit(7, { year: '2024' }); // lượt người dùng sau đó trong cùng chu kỳ
+    d7 = [...svc.pendingHits.values()][0];
+    assert.strictEqual(d7.hits, 1, 'recordHit sau đó cộng hits lên 1');
+    assert.strictEqual(d7.durationMs, 900, 'giữ nguyên durationMs worker đã ghi');
+    svc.recordDuration(9, {}); // durationMs undefined -> bỏ qua, không tạo entry
+    assert.strictEqual(svc.pendingHits.size, 1, 'recordDuration không durationMs -> no-op');
     svc.pendingHits.clear();
 
     // flushHits rỗng -> no-op, không ném
