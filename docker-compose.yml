@@ -13,6 +13,10 @@ services:
       retries: 5
   redis:
     image: redis:7-alpine
+    # Có trần bộ nhớ + LRU vì Node ghi 1 key/biến thể cho MỌI lượt miss (TTL 30s)
+    # — số tổ hợp filter không giới hạn. Không đặt trần thì Redis mặc định ăn RAM
+    # tới khi lỗi write/OOM thay vì evict. Mất key chỉ là chạy SQL live.
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
     ports:
       - "6379:6379"
     healthcheck:

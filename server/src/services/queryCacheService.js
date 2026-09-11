@@ -27,15 +27,45 @@ function cacheKey(queryConfigId, key) {
   return `cache:${queryConfigId}:${key || '_'}`;
 }
 
+// get()/set() được await NGAY TRÊN request path, nên mọi đường Redis hỏng đều
+// phải fail nhanh, không được treo:
+// - reconnectStrategy: false — mặc định node-redis retry kết nối vô hạn, khiến
+//   connect() không bao giờ settle và try/catch bên dưới vô dụng (đo được: mặc
+//   định treo > 6s và không dừng; với false thì reject sau ~6ms).
+// - disableOfflineQueue: true — chặn nốt đường lệnh phát ra lúc socket mất kết
+//   nối bị xếp hàng chờ thay vì reject.
+// Đánh đổi: client không tự hồi phục, nên quên nó đi mỗi lần đứt để lượt sau
+// dựng client mới — Redis sống lại là cache tự chạy lại.
+const RETRY_COOLDOWN_MS = 5_000;
 let clientPromise = null;
+let nextRetryAt = 0;
+
 function getClient() {
   if (!clientPromise) {
-    const client = createClient({ url: env.redisUrl });
-    client.on('error', (err) => console.error('[queryCacheService] Redis lỗi:', err.message));
+    // Redis vừa chết: đừng dựng socket mới cho TỪNG request (1 report = hàng
+    // chục widget -> hàng chục lần thử + log mỗi lượt). Nghỉ rồi thử lại.
+    if (Date.now() < nextRetryAt) {
+      return Promise.reject(new Error('Redis vừa lỗi, đang tạm nghỉ trước khi thử lại'));
+    }
+
+    const client = createClient({
+      url: env.redisUrl,
+      socket: { connectTimeout: 1000, reconnectStrategy: false },
+      disableOfflineQueue: true,
+    });
+    const forget = () => {
+      clientPromise = null;
+      nextRetryAt = Date.now() + RETRY_COOLDOWN_MS;
+    };
+    client.on('error', (err) => {
+      console.error('[queryCacheService] Redis lỗi:', err.message);
+      forget();
+    });
+    client.on('end', forget);
     clientPromise = client.connect().then(
       () => client,
       (err) => {
-        clientPromise = null;
+        forget();
         throw err;
       }
     );
@@ -86,8 +116,11 @@ async function deleteForQueryConfigId(queryConfigId) {
   try {
     const client = await getClient();
     const pattern = cacheKey(queryConfigId, '*');
-    for await (const key of client.scanIterator({ MATCH: pattern })) {
-      await client.del(key);
+    // scanIterator yield từng MẢNG key (batch), không phải từng key. Trang rỗng
+    // là bình thường với SCAN — del([]) sẽ ném lỗi, bị catch nuốt và bỏ dở các
+    // trang sau, để lại cache cũ của query vừa sửa.
+    for await (const keys of client.scanIterator({ MATCH: pattern })) {
+      if (keys.length) await client.del(keys);
     }
   } catch (err) {
     console.error('[queryCacheService] Redis xoá lỗi:', err.message);
@@ -210,9 +243,11 @@ if (require.main === module) {
     const TEST_ID = 999999;
     const env = require('../config/env');
 
+    // reconnectStrategy: false vì lý do y hệt getClient() — thiếu nó thì probe
+    // retry vô hạn, connect() không settle và self-check treo thay vì in "skip".
     const probe = require('redis').createClient({
       url: env.redisUrl,
-      socket: { connectTimeout: 1000 },
+      socket: { connectTimeout: 1000, reconnectStrategy: false },
     });
     probe.on('error', () => {});
     try {
@@ -237,6 +272,19 @@ if (require.main === module) {
 
     await svc.deleteForQueryConfigId(TEST_ID);
     assert.strictEqual(await svc.get(TEST_ID, { year: '2024' }), undefined, 'deleteForQueryConfigId xoá hết');
+
+    // Đủ nhiều biến thể để SCAN phải chạy nhiều trang và gặp trang rỗng — bản
+    // trước dừng ngay ở trang rỗng nên để sót key, mà 1 key thì test không thấy.
+    const MANY = 50;
+    for (let i = 0; i < MANY; i++) await svc.set(TEST_ID, { i: String(i) }, data);
+    await svc.deleteForQueryConfigId(TEST_ID);
+    for (let i = 0; i < MANY; i++) {
+      assert.strictEqual(
+        await svc.get(TEST_ID, { i: String(i) }),
+        undefined,
+        `deleteForQueryConfigId phải xoá hết mọi biến thể (sót biến thể ${i})`
+      );
+    }
 
     svc.pendingHits.clear();
     svc.recordHit(7, { year: '2024' });
