@@ -11,41 +11,6 @@ const sqlParams = require('./sqlParams');
 const queryCacheService = require('./queryCacheService');
 const queryCacheEntryRepository = require('../repositories/queryCacheEntryRepository');
 
-// Cache kết quả chạy query theo query_configs.id + giá trị filter liên quan, TTL
-// ngắn để giảm tải DB nguồn khi nhiều request cùng chạy 1 query trong thời gian
-// ngắn (vd. nhiều widget dùng chung 1 query config trên cùng report). update()/
-// remove() xoá mọi entry của id đó khỏi cache vì query text có thể đã đổi.
-const RUN_CACHE_TTL_MS = 30_000;
-const RUN_CACHE_SWEEP_INTERVAL_MS = 60 * 1000; // quét mỗi 1 phút, giống dataSourcePool.js
-const runCache = new Map(); // key: `${queryConfigId}::${sortedFilterValuesJson}` -> { data, expiresAt }
-
-function runCacheKey(queryConfigId, relevantValues) {
-  const sortedEntries = Object.entries(relevantValues).sort(([a], [b]) => a.localeCompare(b));
-  return `${queryConfigId}::${JSON.stringify(sortedEntries)}`;
-}
-
-// update()/remove() gọi hàm này để xoá MỌI biến thể cache của 1 query_config (mọi
-// giá trị filter đã từng chạy) — không chỉ 1 khoá đơn như trước, vì giờ 1 id có thể
-// có nhiều entry cache khác nhau theo filter.
-function clearRunCacheForId(queryConfigId) {
-  const prefix = `${queryConfigId}::`;
-  for (const key of runCache.keys()) {
-    if (key.startsWith(prefix)) runCache.delete(key);
-  }
-}
-
-function sweepExpiredRunCache() {
-  const now = Date.now();
-  for (const [key, entry] of runCache.entries()) {
-    if (entry.expiresAt <= now) {
-      runCache.delete(key);
-    }
-  }
-}
-
-const runCacheSweepTimer = setInterval(sweepExpiredRunCache, RUN_CACHE_SWEEP_INTERVAL_MS);
-runCacheSweepTimer.unref();
-
 // Chặn 1 request chạy song song quá nhiều query lên Data Source DB (fan-out
 // không giới hạn có thể cạn pool connection của DB nguồn — pg/mssql pool mặc
 // định max=10). 1 report thực tế hiếm khi có hơn vài chục widget.
@@ -124,28 +89,17 @@ async function executeQueryConfig(queryConfig, connection, filterValues = {}, op
     rows,
   });
 
-  const cacheKey = runCacheKey(queryConfig.id, relevantValues);
-
   if (!skipCache) {
-    // Tầng 1 — runCache RAM (TTL 30s, 1 tiến trình)
-    const cached = runCache.get(cacheKey);
-    if (cached && cached.expiresAt > Date.now()) {
+    // Redis — gộp tier-1 (RAM) + tier-2 (file) cũ thành 1 tầng duy nhất.
+    const cached = await queryCacheService.get(queryConfig.id, relevantValues);
+    if (cached) {
       queryCacheService.recordHit(queryConfig.id, relevantValues);
-      return cached.data;
-    }
-
-    // Tầng 2 — file JSON do worker ghi sẵn (còn hạn env.cacheFileTtlMs)
-    const fromFile = await queryCacheService.readFresh(queryConfig.id, relevantValues);
-    if (fromFile) {
-      const data = shape(fromFile.columns, fromFile.rows);
-      runCache.set(cacheKey, { data, expiresAt: Date.now() + RUN_CACHE_TTL_MS });
-      queryCacheService.recordHit(queryConfig.id, relevantValues);
-      return data;
+      return shape(cached.columns, cached.rows);
     }
   }
 
-  // Tầng 3 — chạy SQL thật trên Data Source DB. Đo thời gian chạy để scheduler
-  // xếp hạng biến thể theo "hot × đắt" (xem queryCacheEntryRepository.findTopN).
+  // SQL thật trên Data Source DB. Đo thời gian chạy để scheduler xếp hạng
+  // biến thể theo "hot × đắt" (xem queryCacheEntryRepository.findTopN).
   const startedAt = Date.now();
   const { columns, rows } = await runSqlOnConnection(
     connection,
@@ -154,12 +108,15 @@ async function executeQueryConfig(queryConfig, connection, filterValues = {}, op
   );
   const durationMs = Date.now() - startedAt;
   const data = shape(columns, rows);
-  runCache.set(cacheKey, { data, expiresAt: Date.now() + RUN_CACHE_TTL_MS });
+
   if (skipCache) {
     // Worker làm mới cache: cập nhật duration_ms để findTopN lọc theo số liệu
-    // tươi, nhưng KHÔNG cộng hit_count (không phải lượt người dùng xem).
+    // tươi, nhưng KHÔNG cộng hit_count (không phải lượt người dùng xem). Worker
+    // (worker/actors.py) tự ghi Redis TTL dài từ response HTTP này — Node
+    // không ghi cache ở nhánh này.
     queryCacheService.recordDuration(queryConfig.id, relevantValues, durationMs);
   } else {
+    await queryCacheService.set(queryConfig.id, relevantValues, { columns, rows });
     queryCacheService.recordHit(queryConfig.id, relevantValues, durationMs);
   }
   return data;
@@ -336,11 +293,8 @@ async function update(id, { name, description, query, suggestedChartType }) {
     query,
     suggestedChartType,
   });
-  clearRunCacheForId(numericId);
-  // Query text đổi -> mọi biến thể cache cũ có thể sai: bỏ file + dòng entry.
-  queryCacheService.deleteDir(numericId).catch((err) =>
-    console.error('[queryConfigService] xoá cache dir lỗi:', err.message)
-  );
+  // Query text đổi -> mọi biến thể cache cũ có thể sai: xoá hết trên Redis + dòng entry.
+  queryCacheService.deleteForQueryConfigId(numericId);
   queryCacheEntryRepository.deleteByQueryConfigId(numericId).catch((err) =>
     console.error('[queryConfigService] xoá cache entries lỗi:', err.message)
   );
@@ -368,11 +322,8 @@ async function remove(id) {
   }
 
   await queryConfigRepository.remove(numericId);
-  clearRunCacheForId(numericId);
-  // Dòng entry tự xoá theo ON DELETE CASCADE; file thì phải tự dọn.
-  queryCacheService.deleteDir(numericId).catch((err) =>
-    console.error('[queryConfigService] xoá cache dir lỗi:', err.message)
-  );
+  // Dòng entry tự xoá theo ON DELETE CASCADE; Redis thì phải tự dọn.
+  queryCacheService.deleteForQueryConfigId(numericId);
 }
 
 module.exports = {

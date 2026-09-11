@@ -43,7 +43,7 @@ async function decay() {
 async function cleanup() {
   const stale = await queryCacheEntryRepository.deleteIdle(new Date(Date.now() - IDLE_MS));
   for (const s of stale) {
-    await queryCacheService.deleteFile(s.queryConfigId, s.paramsKey);
+    await queryCacheService.deleteVariant(s.queryConfigId, s.paramsKey);
   }
   console.log(`[cacheScheduler] cleanup ${stale.length} biến thể idle`);
 }
@@ -69,7 +69,7 @@ function start() {
   setTimeout(() => {
     runJob('enqueueTopN', enqueueTopN);
     runJob('cleanup', cleanup);
-  }, 30_000).unref();
+  }, 5_000).unref();
 
   console.log(`[cacheScheduler] cron đã đặt (tz ${TZ})`);
 }

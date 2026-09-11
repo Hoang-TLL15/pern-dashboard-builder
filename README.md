@@ -101,7 +101,7 @@ DATABASE_URL=postgresql://<user>:<pass>@<host>:<port>/dashboard_builder_meta
 # Cache (tuỳ chọn — xem bước 4)
 RABBITMQ_URL=amqp://guest:guest@localhost:5672
 INTERNAL_API_SECRET=<bí mật dùng chung với worker>
-CACHE_DIR=<đường dẫn tuyệt đối>
+REDIS_URL=redis://localhost:6379
 CACHE_SCHEDULER_ENABLED=0
 ```
 
@@ -123,15 +123,15 @@ API tại `http://localhost:4000/api`.
 
 ### 4. Cache biến thể query (tuỳ chọn)
 
-Bỏ qua thì app vẫn chạy đầy đủ, chỉ không có file cache.
+Bỏ qua thì app vẫn chạy đầy đủ, chỉ không có cache.
 
 ```bash
-docker compose up -d rabbitmq          # UI: http://localhost:15672 (guest/guest)
+docker compose up -d rabbitmq redis    # RabbitMQ UI: http://localhost:15672 (guest/guest)
 
 cd worker
 python -m venv .venv && .venv\Scripts\activate   # hoặc: source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env                   # điền INTERNAL_API_SECRET + CACHE_DIR khớp server/.env
+cp .env.example .env                   # điền INTERNAL_API_SECRET + REDIS_URL khớp server/.env
 dramatiq actors
 
 # server/.env: CACHE_SCHEDULER_ENABLED=1, rồi npm run dev

@@ -1,17 +1,19 @@
 // src/services/queryCacheService.js
-// Tier-2 cache: giữa runCache RAM (30s, trong queryConfigService) và SQL live.
-// Kết quả biến thể hot được worker ghi ra file JSON; file này lo phần Node ĐỌC
-// file + ghi sổ hit vào query_cache_entries + xoá file khi query đổi. KHÔNG tự
-// chạy SQL, không biết req/res. Xem docs/query-file-cache-queue-design.md.
-const fsp = require('fs/promises');
-const path = require('path');
+// Tầng cache duy nhất (gộp tier-1 RAM + tier-2 file cũ) — lưu kết quả 1 biến
+// thể trong Redis. Ghi từ 2 nguồn, TTL khác nhau: Node ghi khi user request
+// chạy live (miss cache, TTL ngắn — set()); worker Python ghi khi refresh nền
+// (TTL dài, ghi trực tiếp từ worker/actors.py, không qua hàm nào ở đây). Đọc
+// luôn qua get(). Sổ sách hit_count/duration_ms (Postgres) không đổi. Redis là
+// phụ trợ: mọi lỗi kết nối/lệnh -> log rồi coi như miss/no-op, KHÔNG throw.
+// Xem docs/superpowers/specs/2026-09-11-redis-query-cache-design.md.
 const crypto = require('crypto');
+const { createClient } = require('redis');
 const env = require('../config/env');
 const queryCacheEntryRepository = require('../repositories/queryCacheEntryRepository');
 
-// Khoá biến thể dùng làm tên file: '' nếu query không có :param nào có giá trị;
-// ngược lại sha1 của cặp [tên, giá trị] filter đã sort — ổn định giữa các lần,
-// an toàn cho tên file. CHỈ Node tính khoá này; worker nhận sẵn qua message.
+// Khoá biến thể: '' nếu query không có :param nào có giá trị; ngược lại sha1
+// của cặp [tên, giá trị] filter đã sort. CHỈ Node tính khoá này; worker nhận
+// sẵn params_key qua message Dramatiq.
 function paramsKey(relevantValues) {
   const entries = Object.entries(relevantValues)
     .filter(([, v]) => v !== undefined)
@@ -20,30 +22,79 @@ function paramsKey(relevantValues) {
   return crypto.createHash('sha1').update(JSON.stringify(entries)).digest('hex');
 }
 
-function cacheFilePath(queryConfigId, key) {
-  return path.join(env.cacheDir, String(queryConfigId), `${key || '_'}.json`);
+// Hợp đồng key Redis giữa Node và worker/actors.py — đổi 1 bên phải đổi cả 2.
+function cacheKey(queryConfigId, key) {
+  return `cache:${queryConfigId}:${key || '_'}`;
 }
 
-// Đọc tier-2: trả { columns, rows } nếu file tồn tại và computed_at còn trong
-// hạn env.cacheFileTtlMs; ngược lại undefined (caller chạy SQL live).
-async function readFresh(queryConfigId, relevantValues) {
-  const file = cacheFilePath(queryConfigId, paramsKey(relevantValues));
-  let parsed;
-  try {
-    parsed = JSON.parse(await fsp.readFile(file, 'utf8'));
-  } catch (err) {
-    if (err.code === 'ENOENT') return undefined;
-    // File rác (worker crash giữa lúc ghi, đĩa đầy...) -> coi như cache miss,
-    // caller chạy SQL live. Cache là phụ trợ, không được kéo sập widget.
-    if (err instanceof SyntaxError) return undefined;
-    throw err;
+let clientPromise = null;
+function getClient() {
+  if (!clientPromise) {
+    const client = createClient({ url: env.redisUrl });
+    client.on('error', (err) => console.error('[queryCacheService] Redis lỗi:', err.message));
+    clientPromise = client.connect().then(
+      () => client,
+      (err) => {
+        clientPromise = null;
+        throw err;
+      }
+    );
   }
-  const computedAt = new Date(parsed.computed_at).getTime();
-  if (Number.isNaN(computedAt) || Date.now() - computedAt > env.cacheFileTtlMs) {
+  return clientPromise;
+}
+
+// Đọc: { columns, rows } nếu còn trong Redis; undefined nếu miss hoặc Redis
+// lỗi/không kết nối được — caller luôn có đường lùi chạy SQL live.
+async function get(queryConfigId, relevantValues) {
+  try {
+    const client = await getClient();
+    const raw = await client.get(cacheKey(queryConfigId, paramsKey(relevantValues)));
+    return raw ? JSON.parse(raw) : undefined;
+  } catch (err) {
+    console.error('[queryCacheService] Redis get lỗi:', err.message);
     return undefined;
   }
-  return { columns: parsed.columns, rows: parsed.rows };
 }
+
+// Ghi sau 1 lượt SQL live do USER request gây ra (miss cache) — TTL ngắn
+// (env.cacheTtlFreshMs). Worker refresh nền ghi TTL dài trực tiếp từ Python,
+// không qua hàm này.
+async function set(queryConfigId, relevantValues, data) {
+  try {
+    const client = await getClient();
+    await client.set(cacheKey(queryConfigId, paramsKey(relevantValues)), JSON.stringify(data), {
+      PX: env.cacheTtlFreshMs,
+    });
+  } catch (err) {
+    console.error('[queryCacheService] Redis set lỗi:', err.message);
+  }
+}
+
+// Xoá 1 biến thể — scheduler cleanup gọi cho từng biến thể idle > 14 ngày.
+async function deleteVariant(queryConfigId, key) {
+  try {
+    const client = await getClient();
+    await client.del(cacheKey(queryConfigId, key));
+  } catch (err) {
+    console.error('[queryCacheService] Redis xoá lỗi:', err.message);
+  }
+}
+
+// Xoá TOÀN BỘ biến thể của 1 query_config — update()/remove() gọi vì query
+// text đổi thì mọi biến thể cũ có thể sai.
+async function deleteForQueryConfigId(queryConfigId) {
+  try {
+    const client = await getClient();
+    const pattern = cacheKey(queryConfigId, '*');
+    for await (const key of client.scanIterator({ MATCH: pattern })) {
+      await client.del(key);
+    }
+  } catch (err) {
+    console.error('[queryCacheService] Redis xoá lỗi:', err.message);
+  }
+}
+
+// --- Sổ sách hit_count/duration_ms (Postgres) — không đổi so với bản cũ ---
 
 // Gọi sau mỗi lần trả kết quả 1 biến thể — đánh dấu nó được dùng để scheduler
 // xếp hạng. KHÔNG upsert Meta DB ngay: 1 report nhiều widget mở nhiều lần =
@@ -132,36 +183,21 @@ function stripUndefined(obj) {
   return out;
 }
 
-// Scheduler cleanup: xoá file của 1 biến thể idle. Dọn luôn thư mục <id> nếu
-// đã rỗng (rmdir ném ENOTEMPTY khi còn biến thể khác -> bỏ qua).
-async function deleteFile(queryConfigId, key) {
-  await fsp.rm(cacheFilePath(queryConfigId, key), { force: true });
-  await fsp.rmdir(path.join(env.cacheDir, String(queryConfigId))).catch(() => {});
-}
-
-// query_config bị sửa/xoá: bỏ toàn bộ thư mục file của id đó.
-async function deleteDir(queryConfigId) {
-  await fsp.rm(path.join(env.cacheDir, String(queryConfigId)), { recursive: true, force: true });
-}
-
 module.exports = {
   paramsKey,
-  cacheFilePath,
-  readFresh,
+  get,
+  set,
+  deleteVariant,
+  deleteForQueryConfigId,
   recordHit,
   recordDuration,
   flushHits,
   pendingHits,
-  deleteFile,
-  deleteDir,
 };
 
 if (require.main === module) {
   const assert = require('assert');
-  const fs = require('fs');
-  const os = require('os');
 
-  // paramsKey: thứ tự key không đổi kết quả; bỏ undefined; rỗng -> ''
   const a = module.exports.paramsKey({ year: '2024', region: 'VN' });
   const b = module.exports.paramsKey({ region: 'VN', year: '2024' });
   assert.strictEqual(a, b, 'paramsKey phải độc lập thứ tự key');
@@ -170,49 +206,42 @@ if (require.main === module) {
   assert.strictEqual(module.exports.paramsKey({ year: undefined }), '', 'undefined bị bỏ -> chuỗi rỗng');
 
   (async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qcache-'));
-    process.env.CACHE_DIR = dir;
-    delete require.cache[require.resolve('../config/env')];
-    delete require.cache[require.resolve('./queryCacheService')];
-    const svc = require('./queryCacheService');
+    const svc = module.exports;
+    const TEST_ID = 999999;
+    const env = require('../config/env');
 
-    // file thiếu -> undefined
-    assert.strictEqual(await svc.readFresh(1, {}), undefined);
-
-    // file còn hạn -> trả { columns, rows }
-    const fresh = path.join(dir, '1', '_.json');
-    fs.mkdirSync(path.dirname(fresh), { recursive: true });
-    fs.writeFileSync(fresh, JSON.stringify({
-      columns: [{ key: 'x', label: 'x', type: 'number' }],
-      rows: [{ x: 1 }],
-      computed_at: new Date().toISOString(),
-    }));
-    assert.deepStrictEqual(await svc.readFresh(1, {}), {
-      columns: [{ key: 'x', label: 'x', type: 'number' }],
-      rows: [{ x: 1 }],
+    const probe = require('redis').createClient({
+      url: env.redisUrl,
+      socket: { connectTimeout: 1000 },
     });
+    probe.on('error', () => {});
+    try {
+      await probe.connect();
+      await probe.quit();
+    } catch (err) {
+      console.log(`queryCacheService self-check: skip phần Redis — không kết nối được ${env.redisUrl} (${err.message})`);
+      console.log('queryCacheService self-check: OK (chỉ chạy phần paramsKey)');
+      process.exit(0);
+    }
 
-    // file quá hạn -> undefined
-    fs.writeFileSync(fresh, JSON.stringify({
-      columns: [], rows: [],
-      computed_at: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString(),
-    }));
-    assert.strictEqual(await svc.readFresh(1, {}), undefined);
+    assert.strictEqual(await svc.get(TEST_ID, {}), undefined, 'miss -> undefined');
 
-    // file JSON hỏng (worker crash giữa lúc ghi) -> undefined, KHÔNG ném
-    fs.writeFileSync(fresh, '{"columns":[],"rows":[');
-    assert.strictEqual(await svc.readFresh(1, {}), undefined);
+    const data = { columns: [{ key: 'x', label: 'x', type: 'number' }], rows: [{ x: 1 }] };
+    await svc.set(TEST_ID, {}, data);
+    assert.deepStrictEqual(await svc.get(TEST_ID, {}), data, 'set rồi get -> đúng data');
 
-    // computed_at hỏng -> undefined (trước đây NaN lọt qua check TTL)
-    fs.writeFileSync(fresh, JSON.stringify({ columns: [], rows: [], computed_at: 'xxx' }));
-    assert.strictEqual(await svc.readFresh(1, {}), undefined);
+    await svc.set(TEST_ID, { year: '2024' }, data);
+    await svc.deleteVariant(TEST_ID, svc.paramsKey({}));
+    assert.strictEqual(await svc.get(TEST_ID, {}), undefined, 'deleteVariant xoá đúng biến thể');
+    assert.deepStrictEqual(await svc.get(TEST_ID, { year: '2024' }), data, 'deleteVariant không đụng biến thể khác');
 
-    // recordHit: gộp cùng biến thể vào 1 entry, cộng dồn hits, duration
-    // last-write-wins và không bị xoá bởi cache hit không kèm duration.
+    await svc.deleteForQueryConfigId(TEST_ID);
+    assert.strictEqual(await svc.get(TEST_ID, { year: '2024' }), undefined, 'deleteForQueryConfigId xoá hết');
+
     svc.pendingHits.clear();
     svc.recordHit(7, { year: '2024' });
     svc.recordHit(7, { year: '2024' }, 150);
-    svc.recordHit(7, { year: '2024' }); // cache hit sau đó -> giữ nguyên 150
+    svc.recordHit(7, { year: '2024' });
     svc.recordHit(9, {});
     assert.strictEqual(svc.pendingHits.size, 2, '2 biến thể riêng -> 2 entry');
     const e7 = [...svc.pendingHits.values()].find((x) => x.queryConfigId === 7);
@@ -220,22 +249,21 @@ if (require.main === module) {
     assert.strictEqual(e7.durationMs, 150);
     svc.pendingHits.clear();
 
-    // recordDuration: ghi durationMs, KHÔNG cộng hits (lượt worker refresh)
     svc.recordDuration(7, { year: '2024' }, 900);
     let d7 = [...svc.pendingHits.values()][0];
     assert.strictEqual(d7.hits, 0, 'recordDuration không cộng hits');
     assert.strictEqual(d7.durationMs, 900);
-    svc.recordHit(7, { year: '2024' }); // lượt người dùng sau đó trong cùng chu kỳ
+    svc.recordHit(7, { year: '2024' });
     d7 = [...svc.pendingHits.values()][0];
     assert.strictEqual(d7.hits, 1, 'recordHit sau đó cộng hits lên 1');
     assert.strictEqual(d7.durationMs, 900, 'giữ nguyên durationMs worker đã ghi');
-    svc.recordDuration(9, {}); // durationMs undefined -> bỏ qua, không tạo entry
+    svc.recordDuration(9, {});
     assert.strictEqual(svc.pendingHits.size, 1, 'recordDuration không durationMs -> no-op');
     svc.pendingHits.clear();
 
-    // flushHits rỗng -> no-op, không ném
     await svc.flushHits();
 
     console.log('queryCacheService self-check: OK');
+    process.exit(0);
   })();
 }
