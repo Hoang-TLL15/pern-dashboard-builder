@@ -273,9 +273,9 @@ INSERT INTO query_configs (name, description, db_connection_id, query, suggested
 
 -- =========================================================
 -- query_cache_entries — 1 dòng / biến thể (query_config + bộ giá trị filter).
--- CHỈ chứa metadata xếp hạng để scheduler chọn "biến thể hot" đem chạy sẵn ra
--- file; KHÔNG chứa rows (kết quả nằm ở CACHE_DIR/<id>/<params_key>.json).
--- Xem docs/query-file-cache-queue-design.md.
+-- CHỈ chứa metadata xếp hạng để scheduler chọn "biến thể hot" đem chạy sẵn;
+-- KHÔNG chứa rows (kết quả nằm ở Redis, key cache:<id>:<params_key>).
+-- Xem docs/superpowers/specs/2026-09-11-redis-query-cache-design.md.
 -- =========================================================
 CREATE TABLE query_cache_entries (
     query_config_id INTEGER NOT NULL REFERENCES query_configs(id) ON DELETE CASCADE,
