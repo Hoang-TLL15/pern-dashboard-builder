@@ -294,7 +294,7 @@ async function update(id, { name, description, query, suggestedChartType }) {
     suggestedChartType,
   });
   // Query text đổi -> mọi biến thể cache cũ có thể sai: xoá hết trên Redis + dòng entry.
-  queryCacheService.deleteForQueryConfigId(numericId);
+  await queryCacheService.deleteForQueryConfigId(numericId);
   queryCacheEntryRepository.deleteByQueryConfigId(numericId).catch((err) =>
     console.error('[queryConfigService] xoá cache entries lỗi:', err.message)
   );
@@ -323,7 +323,7 @@ async function remove(id) {
 
   await queryConfigRepository.remove(numericId);
   // Dòng entry tự xoá theo ON DELETE CASCADE; Redis thì phải tự dọn.
-  queryCacheService.deleteForQueryConfigId(numericId);
+  await queryCacheService.deleteForQueryConfigId(numericId);
 }
 
 module.exports = {

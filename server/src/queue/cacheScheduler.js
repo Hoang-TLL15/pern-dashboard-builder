@@ -54,7 +54,7 @@ async function runJob(name, fn) {
   try {
     await fn();
   } catch (err) {
-    console.error(`[cacheScheduler] ${name} lỗi:`, err.message);
+    console.error(`[cacheScheduler] ${name} lỗi:`, err.message || err.code);
   }
 }
 

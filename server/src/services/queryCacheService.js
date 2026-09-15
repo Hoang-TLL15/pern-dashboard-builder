@@ -36,6 +36,7 @@ function cacheKey(queryConfigId, key) {
 //   nối bị xếp hàng chờ thay vì reject.
 // Đánh đổi: client không tự hồi phục, nên quên nó đi mỗi lần đứt để lượt sau
 // dựng client mới — Redis sống lại là cache tự chạy lại.
+// getClient() trả null khi Redis không dùng được — caller coi như miss/no-op.
 const RETRY_COOLDOWN_MS = 5_000;
 let clientPromise = null;
 let nextRetryAt = 0;
@@ -43,9 +44,10 @@ let nextRetryAt = 0;
 function getClient() {
   if (!clientPromise) {
     // Redis vừa chết: đừng dựng socket mới cho TỪNG request (1 report = hàng
-    // chục widget -> hàng chục lần thử + log mỗi lượt). Nghỉ rồi thử lại.
+    // chục widget -> hàng chục lần thử). Nghỉ rồi thử lại; trong lúc nghỉ trả
+    // null, không log (lỗi gốc đã log 1 lần ở handler 'error' bên dưới).
     if (Date.now() < nextRetryAt) {
-      return Promise.reject(new Error('Redis vừa lỗi, đang tạm nghỉ trước khi thử lại'));
+      return Promise.resolve(null);
     }
 
     const client = createClient({
@@ -57,16 +59,19 @@ function getClient() {
       clientPromise = null;
       nextRetryAt = Date.now() + RETRY_COOLDOWN_MS;
     };
+    // Chỗ DUY NHẤT log lỗi kết nối — node-redis phát 'error' đúng 1 lần cho cả
+    // bị từ chối lẫn timeout (đã đo). `|| err.code`: localhost phân giải ra cả
+    // ::1 lẫn 127.0.0.1 nên lỗi bị từ chối là AggregateError với message RỖNG.
     client.on('error', (err) => {
-      console.error('[queryCacheService] Redis lỗi:', err.message);
+      console.error('[queryCacheService] Redis lỗi:', err.message || err.code);
       forget();
     });
     client.on('end', forget);
     clientPromise = client.connect().then(
       () => client,
-      (err) => {
+      () => {
         forget();
-        throw err;
+        return null;
       }
     );
   }
@@ -78,6 +83,7 @@ function getClient() {
 async function get(queryConfigId, relevantValues) {
   try {
     const client = await getClient();
+    if (!client) return undefined;
     const raw = await client.get(cacheKey(queryConfigId, paramsKey(relevantValues)));
     return raw ? JSON.parse(raw) : undefined;
   } catch (err) {
@@ -92,6 +98,7 @@ async function get(queryConfigId, relevantValues) {
 async function set(queryConfigId, relevantValues, data) {
   try {
     const client = await getClient();
+    if (!client) return;
     await client.set(cacheKey(queryConfigId, paramsKey(relevantValues)), JSON.stringify(data), {
       PX: env.cacheTtlFreshMs,
     });
@@ -104,6 +111,7 @@ async function set(queryConfigId, relevantValues, data) {
 async function deleteVariant(queryConfigId, key) {
   try {
     const client = await getClient();
+    if (!client) return;
     await client.del(cacheKey(queryConfigId, key));
   } catch (err) {
     console.error('[queryCacheService] Redis xoá lỗi:', err.message);
@@ -115,11 +123,12 @@ async function deleteVariant(queryConfigId, key) {
 async function deleteForQueryConfigId(queryConfigId) {
   try {
     const client = await getClient();
+    if (!client) return;
     const pattern = cacheKey(queryConfigId, '*');
     // scanIterator yield từng MẢNG key (batch), không phải từng key. Trang rỗng
     // là bình thường với SCAN — del([]) sẽ ném lỗi, bị catch nuốt và bỏ dở các
     // trang sau, để lại cache cũ của query vừa sửa.
-    for await (const keys of client.scanIterator({ MATCH: pattern })) {
+    for await (const keys of client.scanIterator({ MATCH: pattern, COUNT: 1000 })) {
       if (keys.length) await client.del(keys);
     }
   } catch (err) {
@@ -254,7 +263,7 @@ if (require.main === module) {
       await probe.connect();
       await probe.quit();
     } catch (err) {
-      console.log(`queryCacheService self-check: skip phần Redis — không kết nối được ${env.redisUrl} (${err.message})`);
+      console.log(`queryCacheService self-check: skip phần Redis — không kết nối được ${env.redisUrl} (${err.message || err.code})`);
       console.log('queryCacheService self-check: OK (chỉ chạy phần paramsKey)');
       process.exit(0);
     }
