@@ -30,11 +30,17 @@ async function updateFilterValuesRequest(id, filterValues) {
   await apiClient.patch(`/reports/${id}/filter-values`, { filterValues });
 }
 
+async function warmRequest(id) {
+  const res = await apiClient.post(`/reports/${id}/warm`);
+  return res.data; // { enqueued }
+}
+
 export default {
   listRequest,
   getByIdRequest,
   createRequest,
   updateRequest,
   updateFilterValuesRequest,
+  warmRequest,
   deleteRequest,
 };

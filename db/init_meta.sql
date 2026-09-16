@@ -40,12 +40,14 @@ CREATE TABLE reports (
     description TEXT,
     filter_values JSONB NOT NULL DEFAULT '{}', -- giá trị global filter áp dụng lần gần nhất, không phải định nghĩa (paramName tự dò từ SQL, xem sqlParams.js)
     filter_options JSONB NOT NULL DEFAULT '{}', -- ánh xạ { paramName: ["opt1","opt2",...] } — filter nào có list thì render dropdown chọn sẵn thay vì ô text; list do report author tự thêm/xoá (xem docs/parameter-filter.md)
+    auto_warm BOOLEAN NOT NULL DEFAULT false, -- true: cacheScheduler 3h sáng mỗi ngày enqueue warm mọi widget của report này, không phụ thuộc hit_count (xem queue/cacheScheduler.js)
     created_at TIMESTAMP NOT NULL DEFAULT now(),
     updated_at TIMESTAMP NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_reports_user_id ON reports(user_id);
 -- DB đã tạo từ trước: chạy tay dòng dưới để thêm cột mới
 -- ALTER TABLE reports ADD COLUMN IF NOT EXISTS filter_options JSONB NOT NULL DEFAULT '{}';
+-- ALTER TABLE reports ADD COLUMN IF NOT EXISTS auto_warm BOOLEAN NOT NULL DEFAULT false;
 
 CREATE TABLE report_widgets (
     id SERIAL PRIMARY KEY,

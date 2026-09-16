@@ -120,6 +120,11 @@ export default function ReportEditor() {
   // { paramName: ["opt1","opt2",...] } — list lựa chọn cho dropdown global filter,
   // do report author tự thêm/xoá. Cấu hình authoring, lưu kèm khi "Lưu report".
   const [filterOptions, setFilterOptions] = useState({});
+  // Cấu hình authoring như filterOptions (lưu kèm khi "Lưu report"): bật thì
+  // cacheScheduler làm nóng cache report này 3h sáng mỗi ngày.
+  const [autoWarm, setAutoWarm] = useState(false);
+  const [warming, setWarming] = useState(false);
+  const [warmMsg, setWarmMsg] = useState('');
   // Định nghĩa global filter luôn tự suy ra từ :paramName có trong SQL của các widget
   // đang có trong report — không lưu/khai báo thủ công, không lưu vào DB.
   const filterDefs = useMemo(
@@ -257,6 +262,7 @@ export default function ReportEditor() {
         setDescription(report.description || '');
         setFilterValues(storedValues);
         setFilterOptions(report.filterOptions || {});
+        setAutoWarm(report.autoWarm ?? false);
         const legacy = isLegacyReport(report);
         const loaded = report.widgets.map((w, i) => {
           const widgetType = w.widgetType ?? 'chart';
@@ -660,6 +666,7 @@ export default function ReportEditor() {
       name,
       description,
       filterOptions,
+      autoWarm,
       widgets: widgets.map((w) => {
         const widgetType = w.widgetType ?? 'chart';
         if (widgetType === 'text') {
@@ -684,6 +691,25 @@ export default function ReportEditor() {
       setSaveError(err.response?.data?.error || 'Không lưu được report');
     } finally {
       setSaving(false);
+    }
+  }
+
+  // Đẩy mọi widget của report vào queue làm nóng cache Redis. Không chờ worker
+  // chạy xong — server trả 202 ngay khi message đã vào RabbitMQ.
+  async function handleWarm() {
+    setWarming(true);
+    setWarmMsg('');
+    try {
+      const enqueued = await reportService.warm(id);
+      setWarmMsg(
+        enqueued === 0
+          ? 'Report chưa có widget chart nào để làm nóng'
+          : `Đã xếp hàng ${enqueued} query — cache sẵn sàng sau ít giây`
+      );
+    } catch (err) {
+      setWarmMsg(err.response?.data?.error || 'Không làm nóng được cache');
+    } finally {
+      setWarming(false);
     }
   }
 
@@ -1129,7 +1155,32 @@ export default function ReportEditor() {
 
           {saveError && <p className="form-message error">{saveError}</p>}
           {saved && <p className="form-message success">Đã lưu</p>}
+          {warmMsg && <p className="form-message">{warmMsg}</p>}
 
+          {/* Chỉ hiện khi đang sửa report đã lưu: report mới chưa có id để gọi
+              API, và checkbox cũng chưa có dòng DB nào để lưu vào. */}
+          {isEditing && (
+            <>
+              <label
+                className="auto-warm-toggle"
+                title="3h sáng mỗi ngày tự làm nóng cache cho report này (lưu khi bấm Lưu report)"
+              >
+                <input
+                  type="checkbox"
+                  checked={autoWarm}
+                  onChange={(e) => setAutoWarm(e.target.checked)}
+                />
+                Warm mỗi ngày
+              </label>
+              <button
+                className="ghost-button"
+                disabled={warming || widgets.length === 0}
+                onClick={handleWarm}
+              >
+                {warming ? 'Đang xếp hàng...' : 'Làm nóng cache'}
+              </button>
+            </>
+          )}
           <button
             className="ghost-button"
             disabled={exporting || widgets.length === 0}

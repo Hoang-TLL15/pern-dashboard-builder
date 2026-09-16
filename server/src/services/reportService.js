@@ -2,6 +2,9 @@
 // Lớp business logic cho reports — không biết gì về req/res của HTTP.
 // BE không hiểu nội dung chart_config, chỉ validate phần khung (mục 7 design doc).
 const reportRepository = require('../repositories/reportRepository');
+const sqlParams = require('./sqlParams');
+const queryCacheService = require('./queryCacheService');
+const publisher = require('../queue/publisher');
 const AppError = require('../utils/AppError');
 
 // Khớp với CHART_TYPE_OPTIONS ở client/src/charts/chartAdapter.js
@@ -92,7 +95,10 @@ function validateFilterOptions(filterOptions) {
   return clean;
 }
 
-function validatePayload({ name, description, widgets, filterOptions }) {
+// autoWarm: cấu hình authoring như filterOptions (đổi khi "Lưu report"). Ép kiểu
+// thẳng thay vì ném lỗi — checkbox thiếu/sai kiểu thì hiểu là tắt, không đáng
+// chặn cả thao tác lưu report vì 1 cờ phụ trợ.
+function validatePayload({ name, description, widgets, filterOptions, autoWarm }) {
   if (typeof name !== 'string' || name.trim().length === 0) {
     throw new AppError('name không được để trống', 400);
   }
@@ -100,8 +106,76 @@ function validatePayload({ name, description, widgets, filterOptions }) {
     name: name.trim(),
     description: typeof description === 'string' ? description : null,
     filterOptions: validateFilterOptions(filterOptions),
+    autoWarm: autoWarm === true,
     widgets: validateWidgets(widgets),
   };
+}
+
+// Nổ 1 report thành các message làm nóng cache — mỗi biến thể 1 message, đúng
+// hợp đồng RabbitMQ đang có (worker không biết report/widget là gì, chỉ nhận
+// { query_config_id, params_key, params }, xem worker/actors.py).
+//
+// params PHẢI dựng y hệt executeQueryConfig (queryConfigService.js): chỉ những
+// :param thực sự xuất hiện trong SQL của CHÍNH query đó. Lệch một ly thì
+// params_key khác đi, worker ghi Redis vào key không ai đọc -> warm vô ích mà
+// không hề báo lỗi.
+function buildWarmMessages(report) {
+  const filterValues = report.filterValues || {};
+  const byQueryConfigId = new Map(); // 2 widget dùng chung 1 query_config -> 1 message
+
+  for (const w of report.widgets) {
+    const qc = w.queryConfig;
+    if (!qc || byQueryConfigId.has(qc.id)) continue;
+
+    const { paramNames } = sqlParams.compileParams(qc.query, qc.dbConnection.dbType);
+    const params = {};
+    for (const name of paramNames) {
+      if (filterValues[name] !== undefined) params[name] = filterValues[name];
+    }
+
+    byQueryConfigId.set(qc.id, {
+      query_config_id: qc.id,
+      params_key: queryCacheService.paramsKey(params),
+      params,
+    });
+  }
+
+  return [...byQueryConfigId.values()];
+}
+
+// Làm nóng cache 1 report theo yêu cầu (nút bấm trong ReportEditor). Dùng
+// filter_values đã lưu trong DB — handleApplyFilters ở client PATCH mỗi lần áp
+// filter nên gần như luôn khớp màn hình.
+async function warm(id, userId) {
+  const numericId = toNumericId(id);
+  const report = await reportRepository.findForWarmForUser(numericId, userId);
+  if (!report) {
+    throw new AppError('Không tìm thấy report', 404);
+  }
+
+  const messages = buildWarmMessages(report);
+  try {
+    for (const message of messages) await publisher.publishRefresh(message);
+  } catch (err) {
+    // Hỏng giữa chừng thì phần đã đẩy vẫn chạy — warm lặp lại được, không có
+    // trạng thái nào để rollback. Trả 503 thay vì để lọt thành 500: RabbitMQ
+    // chết là hạ tầng phụ trợ chết, không phải report hỏng.
+    throw new AppError('Hàng đợi làm mới cache không sẵn sàng', 503);
+  }
+  return { enqueued: messages.length };
+}
+
+// cacheScheduler gọi lúc 3h sáng — làm nóng mọi report bật cờ auto_warm.
+async function warmAutoReports() {
+  const reports = await reportRepository.findAllAutoWarm();
+  let enqueued = 0;
+  for (const report of reports) {
+    for (const message of buildWarmMessages(report)) {
+      await publisher.publishRefresh(message);
+      enqueued += 1;
+    }
+  }
+  return { reports: reports.length, enqueued };
 }
 
 async function list(userId) {
@@ -167,6 +241,8 @@ module.exports = {
   update,
   updateFilterValues,
   remove,
+  warm,
+  warmAutoReports,
 };
 
 // Tự-kiểm nhanh (node src/services/reportService.js) — theo convention "không có
