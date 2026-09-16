@@ -57,6 +57,16 @@ async function updateFilterValues(req, res, next) {
   }
 }
 
+// 202 chứ không 200: message mới chỉ vào queue, worker chưa chạy xong SQL.
+async function warm(req, res, next) {
+  try {
+    const result = await reportService.warm(req.params.id, req.user.id);
+    return res.status(202).json(result);
+  } catch (err) {
+    return next(err);
+  }
+}
+
 module.exports = {
   list,
   getById,
@@ -64,4 +74,5 @@ module.exports = {
   update,
   updateFilterValues,
   remove,
+  warm,
 };

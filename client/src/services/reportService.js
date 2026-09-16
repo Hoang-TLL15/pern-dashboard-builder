@@ -26,8 +26,13 @@ async function updateFilterValues(id, filterValues) {
   return reportApi.updateFilterValuesRequest(id, filterValues);
 }
 
+async function warm(id) {
+  const { enqueued } = await reportApi.warmRequest(id);
+  return enqueued;
+}
+
 async function remove(id) {
   return reportApi.deleteRequest(id);
 }
 
-export default { list, getById, create, update, updateFilterValues, remove };
+export default { list, getById, create, update, updateFilterValues, warm, remove };

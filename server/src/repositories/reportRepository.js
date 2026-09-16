@@ -32,13 +32,40 @@ async function findByIdForUser(id, userId) {
   });
 }
 
-async function createForUser(userId, { name, description, widgets, filterOptions }) {
+// Chỉ lấy đủ thứ cần để dựng message refresh cache: SQL text để dò :param,
+// dbType để compileParams chọn dialect. Widget chữ (query_config_id NULL) bị
+// loại ngay ở tầng DB, không phải lọc lại ở service.
+const WARM_SELECT = {
+  id: true,
+  filterValues: true,
+  widgets: {
+    where: { queryConfigId: { not: null } },
+    select: {
+      queryConfig: {
+        select: { id: true, query: true, dbConnection: { select: { dbType: true } } },
+      },
+    },
+  },
+};
+
+async function findForWarmForUser(id, userId) {
+  return prisma.report.findFirst({ where: { id, userId }, select: WARM_SELECT });
+}
+
+// Không lọc userId: đây là job nền của cacheScheduler, không phải request của
+// user nào cả — không có bề mặt IDOR để bảo vệ.
+async function findAllAutoWarm() {
+  return prisma.report.findMany({ where: { autoWarm: true }, select: WARM_SELECT });
+}
+
+async function createForUser(userId, { name, description, widgets, filterOptions, autoWarm }) {
   return prisma.report.create({
     data: {
       userId,
       name,
       description,
       filterOptions,
+      autoWarm,
       widgets: {
         create: widgets.map((w, i) => ({
           widgetType: w.widgetType,
@@ -55,7 +82,7 @@ async function createForUser(userId, { name, description, widgets, filterOptions
 
 // "Xoá rồi chèn lại" toàn bộ widgets trong 1 transaction thay vì diff từng
 // widget — chấp nhận được vì 1 report thường chỉ có vài widget (mục 7 design doc).
-async function updateForUser(id, userId, { name, description, widgets, filterOptions }) {
+async function updateForUser(id, userId, { name, description, widgets, filterOptions, autoWarm }) {
   return prisma.$transaction(async (tx) => {
     const existing = await tx.report.findFirst({ where: { id, userId } });
     if (!existing) return null;
@@ -68,6 +95,7 @@ async function updateForUser(id, userId, { name, description, widgets, filterOpt
         name,
         description,
         filterOptions,
+        autoWarm,
         updatedAt: new Date(),
         widgets: {
           create: widgets.map((w, i) => ({
@@ -108,6 +136,8 @@ async function countByQueryConfigId(queryConfigId) {
 module.exports = {
   findByUserId,
   findByIdForUser,
+  findForWarmForUser,
+  findAllAutoWarm,
   createForUser,
   updateForUser,
   updateFilterValues,

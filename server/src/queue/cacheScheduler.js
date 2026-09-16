@@ -13,6 +13,7 @@
 const cron = require('node-cron');
 const queryCacheEntryRepository = require('../repositories/queryCacheEntryRepository');
 const queryCacheService = require('../services/queryCacheService');
+const reportService = require('../services/reportService');
 const publisher = require('./publisher');
 
 const TZ = 'Asia/Ho_Chi_Minh';
@@ -48,6 +49,15 @@ async function cleanup() {
   console.log(`[cacheScheduler] cleanup ${stale.length} biến thể idle`);
 }
 
+// Report có cờ auto_warm: làm nóng lại toàn bộ widget mỗi đêm, KHÔNG phụ thuộc
+// hit_count. Khác enqueueTopN ở đúng chỗ đó — top-N chỉ nhặt biến thể người dùng
+// thực sự xem nhiều, còn đây là do author chủ động ghim. TTL worker 24h khớp
+// đúng nhịp cron ngày: warm 3h sáng, hết hạn 3h sáng hôm sau rồi warm lại.
+async function enqueueAutoWarm() {
+  const { reports, enqueued } = await reportService.warmAutoReports();
+  console.log(`[cacheScheduler] auto-warm ${reports} report -> ${enqueued} biến thể`);
+}
+
 // Bọc mỗi job: 1 job lỗi không kéo sập job khác, không để unhandledRejection
 // thoát ra từ callback của node-cron.
 async function runJob(name, fn) {
@@ -60,7 +70,14 @@ async function runJob(name, fn) {
 
 function start() {
   // enqueue top-N: 3h00 mỗi ngày | cleanup: 3h30 mỗi ngày | decay: 4h00 Chủ nhật
-  cron.schedule('0 3 * * *', () => runJob('enqueueTopN', enqueueTopN), { timezone: TZ });
+  cron.schedule(
+    '0 3 * * *',
+    () => {
+      runJob('enqueueTopN', enqueueTopN);
+      runJob('enqueueAutoWarm', enqueueAutoWarm);
+    },
+    { timezone: TZ }
+  );
   cron.schedule('30 3 * * *', () => runJob('cleanup', cleanup), { timezone: TZ });
   cron.schedule('0 4 * * 0', () => runJob('decay', decay), { timezone: TZ });
 
@@ -68,10 +85,11 @@ function start() {
   // tài nguyên lúc khởi động; unref để timer này không giữ tiến trình sống.
   setTimeout(() => {
     runJob('enqueueTopN', enqueueTopN);
+    runJob('enqueueAutoWarm', enqueueAutoWarm);
     runJob('cleanup', cleanup);
   }, 5_000).unref();
 
   console.log(`[cacheScheduler] cron đã đặt (tz ${TZ})`);
 }
 
-module.exports = { start, enqueueTopN, decay, cleanup };
+module.exports = { start, enqueueTopN, enqueueAutoWarm, decay, cleanup };
